@@ -1,7 +1,18 @@
 import { redirect } from "next/navigation";
+import {
+  MockQueueEngineProvider,
+  QueueRecommendationWithMeta,
+} from "@/lib/ai/queue-engine";
+import { getProviderHealthMetrics } from "@/lib/ai/observability";
+import {
+  getSpotifyConnectionStatus,
+  getSpotifyPlaylists,
+} from "@/lib/spotify/service";
 import { LogoutButton } from "@/app/dashboard/LogoutButton";
 import { DashboardContent } from "@/app/dashboard/DashboardContent";
+import { DjSessionRecord, SessionActivityRecord } from "@/lib/dj-session/types";
 import { EventPlanView, EventRecord } from "@/lib/events/types";
+import { normalizeRelation } from "@/lib/supabase/relations";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export default async function DashboardPage() {
@@ -33,21 +44,113 @@ export default async function DashboardPage() {
     .order("created_at", { ascending: false });
 
   const initialPlans: EventPlanView[] =
-    plansData?.map((row) => ({
-      id: row.id,
-      eventId: row.event_id,
-      eventName: row.events.event_name,
-      eventType: row.events.event_type,
-      eventDate: row.events.event_date,
-      startTime: row.events.start_time,
-      endTime: row.events.end_time,
-      crowdSize: row.events.crowd_size,
-      timeline: row.timeline,
-      energyProgression: row.energy_progression,
-      recommendedGenres: row.recommended_genres,
-      starterPlaylist: row.starter_playlist,
-      createdAt: row.created_at,
-    })) ?? [];
+    plansData?.map((row) => {
+      const relatedEvent = normalizeRelation(row.events);
+
+      return {
+        id: row.id,
+        eventId: row.event_id,
+        eventName: relatedEvent?.event_name ?? "",
+        eventType: relatedEvent?.event_type ?? "",
+        eventDate: relatedEvent?.event_date ?? "",
+        startTime: relatedEvent?.start_time ?? "",
+        endTime: relatedEvent?.end_time ?? "",
+        crowdSize: relatedEvent?.crowd_size ?? 0,
+        timeline: row.timeline,
+        energyProgression: row.energy_progression,
+        recommendedGenres: row.recommended_genres,
+        starterPlaylist: row.starter_playlist,
+        createdAt: row.created_at,
+      };
+    }) ?? [];
+
+  const queueProvider = new MockQueueEngineProvider();
+  const initialProviderHealth = getProviderHealthMetrics();
+  const { data: snapshotRows, error: snapshotsError } = await supabase
+    .from("queue_snapshots")
+    .select("id,event_plan_id,created_at,queue_data")
+    .eq("user_id", user.id)
+    .order("created_at", { ascending: false });
+
+  const snapshotMetaByPlan = new Map<
+    string,
+    {
+      latestSnapshotId: string;
+      latestGeneratedAt: string;
+      queueData: QueueRecommendationWithMeta;
+      count: number;
+    }
+  >();
+
+  for (const snapshot of snapshotRows ?? []) {
+    const existing = snapshotMetaByPlan.get(snapshot.event_plan_id);
+    if (existing) {
+      snapshotMetaByPlan.set(snapshot.event_plan_id, {
+        ...existing,
+        count: existing.count + 1,
+      });
+      continue;
+    }
+
+    snapshotMetaByPlan.set(snapshot.event_plan_id, {
+      latestSnapshotId: snapshot.id,
+      latestGeneratedAt: snapshot.created_at,
+      queueData: snapshot.queue_data as QueueRecommendationWithMeta,
+      count: 1,
+    });
+  }
+
+  const initialQueueRecommendations: QueueRecommendationWithMeta[] = await Promise.all(
+    initialPlans.map(async (plan) => {
+      const snapshotMeta = snapshotMetaByPlan.get(plan.id);
+      const generated = await queueProvider.generateFromPlan(plan);
+
+      return {
+        ...(snapshotMeta?.queueData ?? generated),
+        latestSnapshotId: snapshotMeta?.latestSnapshotId ?? null,
+        latestGeneratedAt: snapshotMeta?.latestGeneratedAt ?? null,
+        queueVersionCount: snapshotMeta?.count ?? 0,
+      };
+    }),
+  );
+
+  const { data: liveSessionData, error: liveSessionError } = await supabase
+    .from("dj_sessions")
+    .select("*")
+    .eq("user_id", user.id)
+    .in("session_status", ["live", "paused"])
+    .order("started_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  const { data: sessionActivitiesData, error: sessionActivitiesError } = liveSessionData
+    ? await supabase
+        .from("session_activity")
+        .select("*")
+        .eq("session_id", liveSessionData.id)
+        .order("created_at", { ascending: false })
+        .limit(20)
+    : { data: [], error: null };
+
+  const initialLiveSession = (liveSessionData ?? null) as DjSessionRecord | null;
+  const initialSessionActivities = (sessionActivitiesData ?? []) as SessionActivityRecord[];
+
+  let initialSpotifyConnected = false;
+  let initialSpotifyAccountName: string | null = null;
+  let initialSpotifyPlaylists: Array<{ id: string; name: string; tracksCount: number }> = [];
+  let spotifyErrorMessage: string | null = null;
+
+  try {
+    const connection = await getSpotifyConnectionStatus(user.id);
+    if (connection) {
+      initialSpotifyConnected = true;
+      initialSpotifyAccountName = connection.display_name;
+      initialSpotifyPlaylists = await getSpotifyPlaylists(user.id);
+    }
+  } catch (error) {
+    spotifyErrorMessage =
+      error instanceof Error ? error.message : "Unable to initialize Spotify panel.";
+  }
 
   return (
     <main className="relative min-h-screen overflow-hidden bg-black text-white">
@@ -72,10 +175,88 @@ export default async function DashboardPage() {
               Events
             </a>
             <a
+              href="#spotify"
+              className="block rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white/85 transition hover:border-white/25 hover:bg-white/10"
+            >
+              Spotify
+            </a>
+            <a
+              href="#live-session"
+              className="block rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white/85 transition hover:border-white/25 hover:bg-white/10"
+            >
+              Live Session
+            </a>
+            <a
               href="#music-queue"
               className="block rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white/85 transition hover:border-white/25 hover:bg-white/10"
             >
               Music Queue
+            </a>
+            <a
+              href="#ai-queue-intelligence"
+              className="block rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white/85 transition hover:border-white/25 hover:bg-white/10"
+            >
+              AI Queue Intelligence
+            </a>
+            <a
+              href="#ai-spotify-recommendations"
+              className="block rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white/85 transition hover:border-white/25 hover:bg-white/10"
+            >
+              AI Spotify Recs
+            </a>
+            <a
+              href="#transition-engine"
+              className="block rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white/85 transition hover:border-white/25 hover:bg-white/10"
+            >
+              Transition Engine
+            </a>
+            <a
+              href="#runtime-intelligence-coordinator"
+              className="block rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white/85 transition hover:border-white/25 hover:bg-white/10"
+            >
+              Runtime Coordinator
+            </a>
+            <a
+              href="#runtime-learning-intelligence"
+              className="block rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white/85 transition hover:border-white/25 hover:bg-white/10"
+            >
+              Runtime Learning
+            </a>
+            <a
+              href="#ai-explainability"
+              className="block rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white/85 transition hover:border-white/25 hover:bg-white/10"
+            >
+              AI Explainability
+            </a>
+            <a
+              href="#autonomous-runtime"
+              className="block rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white/85 transition hover:border-white/25 hover:bg-white/10"
+            >
+              Autonomous Runtime
+            </a>
+            <a
+              href="#crowd-intelligence"
+              className="block rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white/85 transition hover:border-white/25 hover:bg-white/10"
+            >
+              Crowd Intelligence
+            </a>
+            <a
+              href="#audio-energy-intelligence"
+              className="block rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white/85 transition hover:border-white/25 hover:bg-white/10"
+            >
+              Audio Energy
+            </a>
+            <a
+              href="#playback-safety-audit"
+              className="block rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white/85 transition hover:border-white/25 hover:bg-white/10"
+            >
+              Playback Safety
+            </a>
+            <a
+              href="#audit-retention"
+              className="block rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white/85 transition hover:border-white/25 hover:bg-white/10"
+            >
+              Audit Retention
             </a>
             <a
               href="#ai-event-plan"
@@ -103,7 +284,17 @@ export default async function DashboardPage() {
         </aside>
 
         <section className="space-y-6">
-          <DashboardContent initialEvents={initialEvents} initialPlans={initialPlans} />
+          <DashboardContent
+            initialEvents={initialEvents}
+            initialPlans={initialPlans}
+            initialQueueRecommendations={initialQueueRecommendations}
+            initialSpotifyConnected={initialSpotifyConnected}
+            initialSpotifyAccountName={initialSpotifyAccountName}
+            initialSpotifyPlaylists={initialSpotifyPlaylists}
+            initialLiveSession={initialLiveSession}
+            initialSessionActivities={initialSessionActivities}
+            initialProviderHealth={initialProviderHealth}
+          />
 
           {eventsError ? (
             <p className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
@@ -114,6 +305,30 @@ export default async function DashboardPage() {
           {plansError ? (
             <p className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
               Unable to load AI plans right now: {plansError.message}
+            </p>
+          ) : null}
+
+          {snapshotsError ? (
+            <p className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+              Unable to load queue snapshots right now: {snapshotsError.message}
+            </p>
+          ) : null}
+
+          {liveSessionError ? (
+            <p className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+              Unable to load live session state: {liveSessionError.message}
+            </p>
+          ) : null}
+
+          {sessionActivitiesError ? (
+            <p className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+              Unable to load session activities: {sessionActivitiesError.message}
+            </p>
+          ) : null}
+
+          {spotifyErrorMessage ? (
+            <p className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+              Spotify integration warning: {spotifyErrorMessage}
             </p>
           ) : null}
 

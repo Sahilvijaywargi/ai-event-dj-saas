@@ -1,0 +1,180 @@
+import "server-only";
+
+import {
+  PlaybackCommandResult,
+  SpotifyDevice,
+  SpotifyPlaybackState,
+} from "@/lib/spotify/types";
+import { getValidSpotifyAccessToken } from "@/lib/spotify/service";
+
+const SPOTIFY_API_BASE = "https://api.spotify.com/v1";
+
+function wait(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function spotifyPlaybackRequest<T>(
+  userId: string,
+  path: string,
+  options?: RequestInit,
+  expectJson = true,
+): Promise<T> {
+  const accessToken = await getValidSpotifyAccessToken(userId);
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt <= 1; attempt += 1) {
+    try {
+      const response = await fetch(`${SPOTIFY_API_BASE}${path}`, {
+        ...options,
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+          ...(options?.headers ?? {}),
+        },
+      });
+      if (response.status === 429) {
+        const retryAfter = Number(response.headers.get("retry-after") ?? "1");
+        await wait(retryAfter * 1000);
+        throw new Error("Spotify playback rate limited.");
+      }
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Spotify playback API error (${response.status}): ${text}`);
+      }
+      if (!expectJson) {
+        return undefined as T;
+      }
+      return (await response.json()) as T;
+    } catch (error) {
+      lastError = error;
+      if (attempt === 1) break;
+      await wait(250 * (attempt + 1));
+    }
+  }
+  throw lastError;
+}
+
+export async function getAvailableSpotifyDevices(userId: string): Promise<SpotifyDevice[]> {
+  const data = await spotifyPlaybackRequest<{ devices: SpotifyDevice[] }>(userId, "/me/player/devices");
+  return data.devices ?? [];
+}
+
+export async function transferSpotifyPlayback(params: {
+  userId: string;
+  deviceId: string;
+  play?: boolean;
+}): Promise<PlaybackCommandResult> {
+  await spotifyPlaybackRequest<void>(
+    params.userId,
+    "/me/player",
+    {
+      method: "PUT",
+      body: JSON.stringify({
+        device_ids: [params.deviceId],
+        play: params.play ?? false,
+      }),
+    },
+    false,
+  );
+  return { ok: true, message: null };
+}
+
+export async function getSpotifyPlaybackState(userId: string): Promise<SpotifyPlaybackState | null> {
+  try {
+    const raw = await spotifyPlaybackRequest<{
+      is_playing: boolean;
+      progress_ms: number;
+      repeat_state: string;
+      shuffle_state: boolean;
+      device: SpotifyDevice | null;
+      item: { id: string | null; name: string; uri: string | null; duration_ms: number; artists: Array<{ name: string }> } | null;
+    }>(userId, "/me/player");
+    return {
+      isPlaying: raw.is_playing ?? false,
+      progressMs: raw.progress_ms ?? 0,
+      device: raw.device ?? null,
+      track: raw.item
+        ? {
+            id: raw.item.id,
+            name: raw.item.name,
+            uri: raw.item.uri,
+            durationMs: raw.item.duration_ms,
+            artistName: raw.item.artists[0]?.name ?? "Unknown Artist",
+          }
+        : null,
+      repeatState: raw.repeat_state ?? null,
+      shuffleState: Boolean(raw.shuffle_state),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function startSpotifyPlayback(params: {
+  userId: string;
+  deviceId?: string;
+  uris?: string[];
+  positionMs?: number;
+}): Promise<PlaybackCommandResult> {
+  const query = params.deviceId ? `?device_id=${encodeURIComponent(params.deviceId)}` : "";
+  await spotifyPlaybackRequest<void>(
+    params.userId,
+    `/me/player/play${query}`,
+    {
+      method: "PUT",
+      body: JSON.stringify({
+        uris: params.uris,
+        position_ms: params.positionMs,
+      }),
+    },
+    false,
+  );
+  return { ok: true, message: null };
+}
+
+export async function pauseSpotifyPlayback(userId: string): Promise<PlaybackCommandResult> {
+  await spotifyPlaybackRequest<void>(userId, "/me/player/pause", { method: "PUT" }, false);
+  return { ok: true, message: null };
+}
+
+export async function skipSpotifyTrack(userId: string): Promise<PlaybackCommandResult> {
+  await spotifyPlaybackRequest<void>(userId, "/me/player/next", { method: "POST" }, false);
+  return { ok: true, message: null };
+}
+
+export async function queueSpotifyTrack(params: {
+  userId: string;
+  uri: string;
+  deviceId?: string;
+}): Promise<PlaybackCommandResult> {
+  const query = new URLSearchParams({ uri: params.uri });
+  if (params.deviceId) query.set("device_id", params.deviceId);
+  await spotifyPlaybackRequest<void>(params.userId, `/me/player/queue?${query.toString()}`, { method: "POST" }, false);
+  return { ok: true, message: null };
+}
+
+export async function setSpotifyVolume(params: {
+  userId: string;
+  volumePercent: number;
+  deviceId?: string;
+}): Promise<PlaybackCommandResult> {
+  const query = new URLSearchParams({
+    volume_percent: String(Math.max(0, Math.min(100, Math.round(params.volumePercent)))),
+  });
+  if (params.deviceId) query.set("device_id", params.deviceId);
+  await spotifyPlaybackRequest<void>(params.userId, `/me/player/volume?${query.toString()}`, { method: "PUT" }, false);
+  return { ok: true, message: null };
+}
+
+export async function seekSpotifyPlayback(params: {
+  userId: string;
+  positionMs: number;
+  deviceId?: string;
+}): Promise<PlaybackCommandResult> {
+  const query = new URLSearchParams({
+    position_ms: String(Math.max(0, Math.round(params.positionMs))),
+  });
+  if (params.deviceId) query.set("device_id", params.deviceId);
+  await spotifyPlaybackRequest<void>(params.userId, `/me/player/seek?${query.toString()}`, { method: "PUT" }, false);
+  return { ok: true, message: null };
+}
+

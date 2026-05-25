@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { normalizeRelation } from "@/lib/supabase/relations";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export async function GET() {
@@ -25,21 +26,25 @@ export async function GET() {
   }
 
   const plans =
-    data?.map((row) => ({
-      id: row.id,
-      eventId: row.event_id,
-      eventName: row.events.event_name,
-      eventType: row.events.event_type,
-      eventDate: row.events.event_date,
-      startTime: row.events.start_time,
-      endTime: row.events.end_time,
-      crowdSize: row.events.crowd_size,
-      timeline: row.timeline,
-      energyProgression: row.energy_progression,
-      recommendedGenres: row.recommended_genres,
-      starterPlaylist: row.starter_playlist,
-      createdAt: row.created_at,
-    })) ?? [];
+    data?.map((row) => {
+      const relatedEvent = normalizeRelation(row.events);
+
+      return {
+        id: row.id,
+        eventId: row.event_id,
+        eventName: relatedEvent?.event_name ?? null,
+        eventType: relatedEvent?.event_type ?? null,
+        eventDate: relatedEvent?.event_date ?? null,
+        startTime: relatedEvent?.start_time ?? null,
+        endTime: relatedEvent?.end_time ?? null,
+        crowdSize: relatedEvent?.crowd_size ?? null,
+        timeline: row.timeline,
+        energyProgression: row.energy_progression,
+        recommendedGenres: row.recommended_genres,
+        starterPlaylist: row.starter_playlist,
+        createdAt: row.created_at,
+      };
+    }) ?? [];
 
   return NextResponse.json({ plans });
 }

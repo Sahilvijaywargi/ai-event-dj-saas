@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
+import { createQueueSnapshotForPlan } from "@/lib/ai/queue-snapshots";
+import { createQueueEngineProvider } from "@/lib/ai/providers";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
-import { CreateEventPayload } from "@/lib/events/types";
+import { CreateEventPayload, EventPlanView } from "@/lib/events/types";
 import { generateEventPlan } from "@/lib/events/generator";
 import { validateCreateEventPayload } from "@/lib/events/validation";
 
@@ -100,5 +102,52 @@ export async function POST(request: Request) {
     );
   }
 
-  return NextResponse.json({ event: data, plan: planData }, { status: 201 });
+  const planForQueue: EventPlanView = {
+    id: planData.id,
+    eventId: planData.event_id,
+    eventName: data.event_name,
+    eventType: data.event_type,
+    eventDate: data.event_date,
+    startTime: data.start_time,
+    endTime: data.end_time,
+    crowdSize: data.crowd_size,
+    timeline: planData.timeline,
+    energyProgression: planData.energy_progression,
+    recommendedGenres: planData.recommended_genres,
+    starterPlaylist: planData.starter_playlist,
+    createdAt: planData.created_at,
+  };
+
+  const provider = createQueueEngineProvider();
+  const queueSnapshotResult = await createQueueSnapshotForPlan({
+    supabase,
+    provider,
+    userId: user.id,
+    plan: planForQueue,
+  });
+
+  if (!queueSnapshotResult.ok) {
+    return NextResponse.json(
+      {
+        event: data,
+        plan: planData,
+        queueSnapshot: null,
+        queueVersionCount: 0,
+        queueSnapshotWarning: queueSnapshotResult.message,
+        message: "Event and AI plan created. Queue snapshot creation failed gracefully.",
+      },
+      { status: 201 },
+    );
+  }
+
+  return NextResponse.json(
+    {
+      event: data,
+      plan: planData,
+      queueSnapshot: queueSnapshotResult.snapshot,
+      queueVersionCount: queueSnapshotResult.queueVersionCount,
+      queueSnapshotWarning: null,
+    },
+    { status: 201 },
+  );
 }
