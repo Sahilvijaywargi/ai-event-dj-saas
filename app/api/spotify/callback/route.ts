@@ -47,8 +47,11 @@ export async function GET(request: Request) {
     });
 
     return NextResponse.redirect(new URL("/dashboard?spotify_connected=1", request.url));
-  } catch {
-    return NextResponse.redirect(new URL("/dashboard?spotify_error=connect_failed", request.url));
+  } catch (error) {
+    console.error("SPOTIFY CALLBACK ERROR:", error);
+  
+    return NextResponse.redirect(
+      new URL("/dashboard?spotify_error=connect_failed", request.url),
+    );
   }
 }
-
