@@ -115,6 +115,10 @@ export function getSpotifyConnectUrl(state: string) {
     "playlist-read-private",
     "user-library-read",
     "user-read-private",
+    "user-read-playback-state",
+    "user-modify-playback-state",
+    "user-read-currently-playing",
+    "streaming",
   ].join(" ");
 
   const url = new URL(`${SPOTIFY_ACCOUNTS_BASE}/authorize`);
@@ -276,33 +280,66 @@ export async function searchSpotify(
   type: SpotifySearchType,
 ): Promise<SpotifySearchItem[]> {
   const accessToken = await getValidSpotifyAccessToken(userId);
+
   const encoded = encodeURIComponent(query);
+
   const data = await spotifyFetch<{
-    tracks?: { items: Array<{ id: string; name: string; artists: Array<{ name: string }> }> };
-    artists?: { items: Array<{ id: string; name: string }> };
-    playlists?: { items: Array<{ id: string; name: string }> };
-  }>(accessToken, `/search?q=${encoded}&type=${type}&limit=12`);
+    tracks?: {
+      items: Array<{
+        id: string;
+        name: string;
+        artists?: Array<{ name: string }>;
+      }>;
+    };
+
+    artists?: {
+      items: Array<{
+        id: string;
+        name: string;
+      }>;
+    };
+
+    playlists?: {
+      items: Array<{
+        id: string;
+        name: string;
+      }>;
+    };
+  }>(
+    accessToken,
+    `/search?q=${encoded}&type=${type}&limit=10`,
+  );
 
   if (type === "track") {
-    return (data.tracks?.items ?? []).map((item) => ({
-      id: item.id,
-      name: item.name,
-      type: "track",
-      artistName: item.artists[0]?.name,
-    }));
+    return (data.tracks?.items ?? [])
+      .filter((item) => item && item.id && item.name)
+      .map((item) => ({
+        id: item.id,
+        name: item.name,
+        type: "track" as const,
+        artistName:
+          item.artists?.[0]?.name ??
+          "Unknown Artist",
+      }));
   }
+
   if (type === "artist") {
-    return (data.artists?.items ?? []).map((item) => ({
+    return (data.artists?.items ?? [])
+      .filter((item) => item && item.id && item.name)
+      .map((item) => ({
+        id: item.id,
+        name: item.name,
+        type: "artist" as const,
+      }));
+  }
+
+  return (data.playlists?.items ?? [])
+    .filter((item) => item && item.id && item.name)
+    .map((item) => ({
       id: item.id,
       name: item.name,
-      type: "artist",
+      type: "playlist" as const,
     }));
-  }
-  return (data.playlists?.items ?? []).map((item) => ({
-    id: item.id,
-    name: item.name,
-    type: "playlist",
-  }));
 }
 
 export async function getSpotifyAudioFeatures(
