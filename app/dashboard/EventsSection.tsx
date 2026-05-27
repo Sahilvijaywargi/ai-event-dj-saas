@@ -254,8 +254,8 @@ export function EventsSection({
       )}
 
       {isOpen ? (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/75 p-4">
-          <div className="glass-panel w-full max-w-2xl rounded-2xl p-5 md:p-6">
+        <div className="fixed inset-0 z-40 overflow-y-auto bg-black/75 p-4">
+          <div className="glass-panel mx-auto mt-10 w-full max-w-2xl rounded-2xl p-5 md:p-6">
             <div className="mb-4 flex items-center justify-between">
               <h3 className="text-xl font-semibold">
                 Create New Event
@@ -271,11 +271,146 @@ export function EventsSection({
             </div>
 
             <form
-              onSubmit={handleSubmit}
-              className="grid gap-4 md:grid-cols-2"
-            >
-              {/* KEEP REST OF YOUR FORM EXACTLY SAME */}
-            </form>
+  onSubmit={handleSubmit}
+  className="grid gap-4 md:grid-cols-2"
+>
+  <input
+    type="text"
+    placeholder="Event Name"
+    value={formState.eventName}
+    onChange={(e) =>
+      setFormState({
+        ...formState,
+        eventName: e.target.value,
+      })
+    }
+    className="rounded-xl border border-white/10 bg-black/30 px-4 py-3"
+    required
+  />
+
+  <select
+    value={formState.eventType}
+    onChange={(e) =>
+      setFormState({
+        ...formState,
+        eventType: e.target.value,
+      })
+    }
+    className="rounded-xl border border-white/10 bg-black/30 px-4 py-3"
+    required
+  >
+    <option value="">Select Event Type</option>
+    <option value="House Party">
+      House Party
+    </option>
+    <option value="Wedding">
+      Wedding
+    </option>
+    <option value="Club">
+      Club
+    </option>
+    <option value="Corporate">
+      Corporate
+    </option>
+  </select>
+
+  <input
+    type="date"
+    value={formState.date}
+    onChange={(e) =>
+      setFormState({
+        ...formState,
+        date: e.target.value,
+      })
+    }
+    className="rounded-xl border border-white/10 bg-black/30 px-4 py-3"
+    required
+  />
+
+  <input
+    type="time"
+    value={formState.startTime}
+    onChange={(e) =>
+      setFormState({
+        ...formState,
+        startTime: e.target.value,
+      })
+    }
+    className="rounded-xl border border-white/10 bg-black/30 px-4 py-3"
+    required
+  />
+
+  <input
+    type="time"
+    value={formState.endTime}
+    onChange={(e) =>
+      setFormState({
+        ...formState,
+        endTime: e.target.value,
+      })
+    }
+    className="rounded-xl border border-white/10 bg-black/30 px-4 py-3"
+    required
+  />
+
+  <input
+    type="number"
+    placeholder="Crowd Size"
+    value={formState.crowdSize}
+    onChange={(e) =>
+      setFormState({
+        ...formState,
+        crowdSize: e.target.value,
+      })
+    }
+    className="rounded-xl border border-white/10 bg-black/30 px-4 py-3"
+    required
+  />
+
+  <input
+    type="text"
+    placeholder="Genres (comma separated)"
+    value={formState.genres}
+    onChange={(e) =>
+      setFormState({
+        ...formState,
+        genres: e.target.value,
+      })
+    }
+    className="rounded-xl border border-white/10 bg-black/30 px-4 py-3 md:col-span-2"
+    required
+  />
+
+<div className="md:col-span-2 space-y-2">
+  <label className="text-sm text-white/70">
+    Energy Level: {formState.energyLevel}
+  </label>
+
+  <input
+    type="range"
+    min="1"
+    max="10"
+    value={formState.energyLevel}
+    onChange={(e) =>
+      setFormState({
+        ...formState,
+        energyLevel: e.target.value,
+      })
+    }
+    className="w-full accent-white"
+  />
+</div>
+
+  <button
+    type="submit"
+    disabled={isSubmitting}
+    className="mt-4 rounded-xl bg-white px-4 py-3 font-semibold text-black transition hover:bg-white/80 disabled:opacity-60 md:col-span-2"
+  >
+    {isSubmitting
+      ? "Creating Event..."
+      : "Create Event"}
+  </button>
+</form>
           </div>
         </div>
       ) : null}

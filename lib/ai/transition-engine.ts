@@ -93,7 +93,134 @@ function recentTransitionCooldown(activities: Array<{ activity_type: string; cre
   if (!lastTransition) return false;
   return Date.now() - new Date(lastTransition.created_at).getTime() < 25_000;
 }
+function scoreBpmCompatibility(
+  currentBpm: number,
+  nextBpm: number,
+) {
+  const difference = Math.abs(
+    currentBpm - nextBpm,
+  );
 
+  if (difference <= 2) return 100;
+
+  if (difference <= 4) return 92;
+
+  if (difference <= 6) return 82;
+
+  if (difference <= 8) return 68;
+
+  if (difference <= 10) return 52;
+
+  return 30;
+}
+
+function scoreEnergyFlow(
+  currentEnergy: number,
+  nextEnergy: number,
+  phase: string | null,
+) {
+  const delta = nextEnergy - currentEnergy;
+
+  if (
+    phase === "warmup" &&
+    delta > 2
+  ) {
+    return 45;
+  }
+
+  if (
+    phase === "peak" &&
+    delta >= 0
+  ) {
+    return 92;
+  }
+
+  if (
+    phase === "cooldown" &&
+    delta > 1
+  ) {
+    return 40;
+  }
+
+  const difference = Math.abs(delta);
+
+  return clamp(
+    100 - difference * 18,
+    0,
+    100,
+  );
+}
+
+function scoreHarmonicCompatibility(
+  currentKey?: string | null,
+  nextKey?: string | null,
+) {
+  if (!currentKey || !nextKey) {
+    return 65;
+  }
+
+  if (currentKey === nextKey) {
+    return 100;
+  }
+
+  const compatiblePairs = [
+    ["8A", "9A"],
+    ["9A", "10A"],
+    ["10A", "11A"],
+    ["11A", "12A"],
+  ];
+
+  const compatible =
+    compatiblePairs.some(
+      ([a, b]) =>
+        (a === currentKey &&
+          b === nextKey) ||
+        (a === nextKey &&
+          b === currentKey),
+    );
+
+  return compatible ? 88 : 52;
+}
+
+function scoreVocalClash(
+  currentTrack: {
+    speechiness?: number | null;
+  },
+  nextTrack: {
+    speechiness?: number | null;
+  },
+) {
+  const currentSpeech =
+    currentTrack.speechiness ?? 0;
+
+  const nextSpeech =
+    nextTrack.speechiness ?? 0;
+
+  if (
+    currentSpeech > 0.45 &&
+    nextSpeech > 0.45
+  ) {
+    return 35;
+  }
+
+  return 90;
+}
+
+function computeTransitionBlendScore(params: {
+  bpmScore: number;
+  energyScore: number;
+  harmonicScore: number;
+  vocalScore: number;
+}) {
+  return clamp(
+    params.bpmScore * 0.3 +
+      params.energyScore * 0.3 +
+      params.harmonicScore * 0.25 +
+      params.vocalScore * 0.15,
+    0,
+    100,
+  );
+}
 export async function evaluateTransitionEngine(params: {
   userId: string;
   queueRecommendations: QueueRecommendationWithMeta[];
@@ -129,7 +256,53 @@ export async function evaluateTransitionEngine(params: {
   const duplicateTransition = Boolean(topRecommendation?.id && topRecommendation.id === playbackTrackId);
   const unsafeEnergySpike =
     session && topRecommendation ? topRecommendation.energy - session.current_energy > 2.5 : false;
-
+    const bpmCompatibilityScore =
+    session && topRecommendation
+      ? scoreBpmCompatibility(
+          session.current_bpm,
+          topRecommendation.bpm,
+        )
+      : 60;
+  
+  const energyFlowScore =
+    session && topRecommendation
+      ? scoreEnergyFlow(
+          session.current_energy,
+          topRecommendation.energy,
+          session.current_phase,
+        )
+      : 60;
+  
+  const harmonicCompatibilityScore =
+    scoreHarmonicCompatibility(
+      null,
+      null,
+    );
+  
+  const vocalClashScore =
+    scoreVocalClash(
+      {
+        speechiness: 0.2,
+      },
+      {
+        speechiness: 0.2,
+      },
+    );
+  
+  const transitionBlendScore =
+    computeTransitionBlendScore({
+      bpmScore:
+        bpmCompatibilityScore,
+  
+      energyScore:
+        energyFlowScore,
+  
+      harmonicScore:
+        harmonicCompatibilityScore,
+  
+      vocalScore:
+        vocalClashScore,
+    });
   const reasons: string[] = [];
   if (!params.assistedAutonomousEnabled) reasons.push("Assisted-autonomous mode disabled.");
   if (cooldownBlocked) reasons.push("Transition cooldown active.");
@@ -155,6 +328,22 @@ export async function evaluateTransitionEngine(params: {
   score += feedbackSummary.energyAdaptationTrend * 2.4;
   score -= Math.max(0, feedbackSummary.operatorInterventionRate - 45) * 0.45;
   score += (audioState.engagement.engagementScore - 50) * 0.16;
+  score +=
+  (transitionBlendScore - 70) *
+  0.45;
+
+score +=
+  (bpmCompatibilityScore - 70) *
+  0.18;
+
+score +=
+  (energyFlowScore - 70) *
+  0.22;
+
+score +=
+  (harmonicCompatibilityScore -
+    70) *
+  0.15;
   score += audioState.drift.silenceDetected ? -8 : 0;
   score += audioState.drift.spikeDetected ? -4 : 0;
   score += memoryBias.confidenceBias * 0.45;

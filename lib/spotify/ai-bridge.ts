@@ -47,11 +47,55 @@ function energyCompatibility(targetEnergy: number, candidateEnergy: number) {
   return clamp(100 - delta * 20, 0, 100);
 }
 
-function genreBlendingScore(genre: string, recommendation: SpotifyRecommendation) {
-  const combined = `${recommendation.name} ${recommendation.artistName}`.toLowerCase();
-  return combined.includes(genre.toLowerCase()) ? 90 : 70;
-}
+function genreBlendingScore(
+  recommendation: QueueRecommendationWithMeta,
+  spotifyTrack: SpotifyRecommendation,
+) {
+  const phase = recommendation.currentMoodPhase.toLowerCase();
 
+  const combined =
+    `${spotifyTrack.name} ${spotifyTrack.artistName}`.toLowerCase();
+
+  let score = 50;
+
+  const preferredGenres = recommendation.recommendedQueue
+    .map((track) => track.genre.toLowerCase());
+
+  for (const genre of preferredGenres) {
+    if (combined.includes(genre)) {
+      score += 12;
+    }
+  }
+
+  if (
+    phase.includes("peak") ||
+    phase.includes("drop")
+  ) {
+    if (
+      combined.includes("festival") ||
+      combined.includes("dance") ||
+      combined.includes("edm") ||
+      combined.includes("club")
+    ) {
+      score += 15;
+    }
+  }
+
+  if (
+    phase.includes("warm") ||
+    phase.includes("opening")
+  ) {
+    if (
+      combined.includes("chill") ||
+      combined.includes("lofi") ||
+      combined.includes("deep")
+    ) {
+      score += 15;
+    }
+  }
+
+  return clamp(score, 0, 100);
+}
 function transitionSmoothnessScore(bpmScore: number, energyScore: number) {
   return clamp((bpmScore * 0.6 + energyScore * 0.4), 0, 100);
 }
@@ -151,7 +195,10 @@ export async function createSpotifyEnhancedRecommendations(params: {
 
       const bpmScore = bpmCompatibility(targetBpm, candidateBpm);
       const energyScore = energyCompatibility(targetEnergy, candidateEnergy);
-      const genreScore = genreBlendingScore(recommendation.recommendedQueue[0]?.genre ?? "house", candidate);
+      const genreScore = genreBlendingScore(
+        recommendation,
+        candidate,
+      );
       const smoothness = transitionSmoothnessScore(bpmScore, energyScore);
       const momentumScore = crowdMomentumFit(
         recommendation.crowdMomentum,
