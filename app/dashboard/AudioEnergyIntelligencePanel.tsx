@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type AudioState = {
   latest: {
@@ -29,30 +29,45 @@ export function AudioEnergyIntelligencePanel() {
   const [state, setState] = useState<AudioState | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const isRefreshingRef = useRef(false);
+  const isMountedRef = useRef(true);
 
   async function refreshState() {
+    if (isRefreshingRef.current) return;
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+
+    isRefreshingRef.current = true;
     setIsLoading(true);
     setErrorMessage(null);
     try {
       const response = await fetch("/api/audio-energy/state?limit=40");
       const data = await response.json();
       if (!response.ok) throw new Error(data.message ?? "Failed to load audio energy intelligence.");
-      setState(data.state ?? null);
+      if (isMountedRef.current) {
+        setState(data.state ?? null);
+      }
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Failed to load audio energy intelligence.");
+      if (isMountedRef.current) {
+        setErrorMessage(error instanceof Error ? error.message : "Failed to load audio energy intelligence.");
+      }
     } finally {
-      setIsLoading(false);
+      if (isMountedRef.current) {
+        setIsLoading(false);
+      }
+      isRefreshingRef.current = false;
     }
   }
 
   useEffect(() => {
+    isMountedRef.current = true;
     const timer = setTimeout(() => {
       void refreshState();
     }, 0);
     const interval = setInterval(() => {
       void refreshState();
-    }, 7000);
+    }, 30000);
     return () => {
+      isMountedRef.current = false;
       clearTimeout(timer);
       clearInterval(interval);
     };

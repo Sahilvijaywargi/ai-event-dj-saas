@@ -10,6 +10,7 @@ import {
   getSpotifyConnectionStatus,
   searchSpotify,
 } from "@/lib/spotify/service";
+import { toAudioFeatureIntelligence } from "@/lib/spotify/audio-feature-intelligence";
 import { SpotifyRecommendation } from "@/lib/spotify/types";
 
 type Momentum = QueueRecommendationWithMeta["crowdMomentum"];
@@ -106,6 +107,13 @@ function crowdMomentumFit(momentum: Momentum, candidateEnergy: number, targetEne
   return clamp(100 - delta * 18, 0, 100);
 }
 
+function crowdMomentumFromProjection(projection: number): Momentum {
+  if (projection >= 78) return "surging";
+  if (projection >= 62) return "rising";
+  if (projection <= 38) return "low";
+  return "steady";
+}
+
 function normalizeEnergyBucket(energy: number): EnergyBucket {
   const safe = clamp(Math.round(energy), 1, 10);
   if (safe <= 2) return "very-low";
@@ -188,10 +196,15 @@ export async function createSpotifyEnhancedRecommendations(params: {
 
     const enhanced: AIEnhancedTrackRecommendation[] = spotifyRecommendations.map((candidate) => {
       const feature = featuresByTrack.get(candidate.id);
+      const featureIntelligence = toAudioFeatureIntelligence(feature);
       const candidateBpm = feature?.tempo ? Math.round(feature.tempo) : targetBpm;
       const candidateEnergy = feature?.energy
         ? clamp(Number((feature.energy * 10).toFixed(2)), 1, 10)
         : targetEnergy;
+      const danceability = feature?.danceability ?? 0.5;
+      const valence = feature?.valence ?? 0.5;
+      const crowdMomentumProjection = featureIntelligence?.crowdMomentumProjection ?? 50;
+      const projectedMomentum = crowdMomentumFromProjection(crowdMomentumProjection);
 
       const bpmScore = bpmCompatibility(targetBpm, candidateBpm);
       const energyScore = energyCompatibility(targetEnergy, candidateEnergy);
@@ -201,7 +214,7 @@ export async function createSpotifyEnhancedRecommendations(params: {
       );
       const smoothness = transitionSmoothnessScore(bpmScore, energyScore);
       const momentumScore = crowdMomentumFit(
-        recommendation.crowdMomentum,
+        projectedMomentum,
         candidateEnergy,
         targetEnergy,
       );
@@ -228,12 +241,38 @@ export async function createSpotifyEnhancedRecommendations(params: {
         contextSnapshot: {
           eventPhase: recommendation.currentMoodPhase,
           bpmLane: recommendation.bpmFlow[0] ?? { min: targetBpm - 6, max: targetBpm + 6 },
-          crowdMomentumBucket: recommendation.crowdMomentum,
+          crowdMomentumBucket: projectedMomentum,
           energyBucket: normalizeEnergyBucket(recommendation.currentEnergy),
+        },
+        audioFeatures: featureIntelligence ?? undefined,
+        structuralMetadata: {
+          introLengthBars: 16,
+          outroLengthBars: 16,
+          phraseLength: 16,
+          dropIntensity: Number(clamp((feature?.energy ?? 0.5) * 10, 1, 10).toFixed(2)),
+          breakdownPresence: (feature?.valence ?? 0.5) < 0.45,
+          vocalSections: (feature?.speechiness ?? 0.12) >= 0.33 ? 2 : 1,
+          instrumentalSections: (feature?.instrumentalness ?? 0.25) >= 0.35 ? 3 : 2,
+          beatGridResolution: 16,
+          barAlignmentConfidence: Number(clamp((feature?.danceability ?? 0.5) * 100, 45, 96).toFixed(2)),
+          cuePointCandidates: [8, 16, 24, 32],
+          transitionWindows: [
+            { startBar: 8, endBar: 16, confidence: 78 },
+            { startBar: 24, endBar: 32, confidence: 74 },
+          ],
+          dropTimingMarkers: [16, 32],
+          estimatedMixInPoint: 8,
+          estimatedMixOutPoint: 24,
         },
         scoreBreakdown: {
           bpmCompatibility: Number(bpmScore.toFixed(2)),
-          energyCompatibility: Number(energyScore.toFixed(2)),
+          energyCompatibility: Number(
+            clamp(
+              energyScore * 0.7 + danceability * 100 * 0.2 + valence * 100 * 0.1,
+              0,
+              100,
+            ).toFixed(2),
+          ),
           genreBlending: Number(genreScore.toFixed(2)),
           transitionSmoothness: Number(smoothness.toFixed(2)),
           crowdMomentumFit: Number(momentumScore.toFixed(2)),

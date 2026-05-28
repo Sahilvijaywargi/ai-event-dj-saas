@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type RuntimeState = {
   timestamp: string;
@@ -44,19 +44,32 @@ export function RuntimeIntelligenceCoordinatorPanel() {
   const [state, setState] = useState<RuntimeState | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const isRefreshingRef = useRef(false);
+  const isMountedRef = useRef(true);
 
   async function refreshState() {
+    if (isRefreshingRef.current) return;
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+
+    isRefreshingRef.current = true;
     setIsLoading(true);
     setErrorMessage(null);
     try {
       const response = await fetch("/api/runtime-intelligence/state");
       const data = await response.json();
       if (!response.ok) throw new Error(data.message ?? "Failed to load runtime intelligence.");
-      setState(data.state ?? null);
+      if (isMountedRef.current) {
+        setState(data.state ?? null);
+      }
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Failed to load runtime intelligence.");
+      if (isMountedRef.current) {
+        setErrorMessage(error instanceof Error ? error.message : "Failed to load runtime intelligence.");
+      }
     } finally {
-      setIsLoading(false);
+      if (isMountedRef.current) {
+        setIsLoading(false);
+      }
+      isRefreshingRef.current = false;
     }
   }
 
@@ -80,13 +93,15 @@ export function RuntimeIntelligenceCoordinatorPanel() {
   }
 
   useEffect(() => {
+    isMountedRef.current = true;
     const timer = setTimeout(() => {
       void refreshState();
     }, 0);
     const interval = setInterval(() => {
       void refreshState();
-    }, 7000);
+    }, 25000);
     return () => {
+      isMountedRef.current = false;
       clearTimeout(timer);
       clearInterval(interval);
     };

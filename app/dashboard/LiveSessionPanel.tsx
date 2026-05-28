@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import {
   DjSessionRecord,
@@ -58,6 +58,7 @@ export function LiveSessionPanel({
 
   const [selectedDeviceId, setSelectedDeviceId] =
     useState<string>("");
+  const isPollingRef = useRef(false);
 
   const topSpotifySuggestion =
     useMemo<AIEnhancedTrackRecommendation | null>(() => {
@@ -175,16 +176,29 @@ export function LiveSessionPanel({
     }
   }
 
+  async function refreshPollingState() {
+    if (isPollingRef.current) return;
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+
+    isPollingRef.current = true;
+    try {
+      await refreshDiagnosticsTelemetry();
+      await refreshPlaybackState();
+    } finally {
+      isPollingRef.current = false;
+    }
+  }
+
   useEffect(() => {
-    void refreshDiagnosticsTelemetry();
-    void refreshPlaybackState();
+    void refreshPollingState();
 
     const timer = setInterval(() => {
-      void refreshDiagnosticsTelemetry();
-      void refreshPlaybackState();
-    }, 7000);
+      void refreshPollingState();
+    }, 25000);
 
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+    };
   }, []);
 
   return (

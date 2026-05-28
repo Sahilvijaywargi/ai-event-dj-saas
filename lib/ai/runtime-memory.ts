@@ -21,6 +21,14 @@ export type RuntimeLearningSignal = {
     | "audio_energy"
     | "operator";
   signal: string;
+  category?:
+  | "bpm"
+  | "energy"
+  | "harmonic"
+  | "vocal"
+  | "crowd"
+  | "confidence"
+  | "operator";
   value: number;
   weight: number;
   polarity: "positive" | "negative" | "neutral";

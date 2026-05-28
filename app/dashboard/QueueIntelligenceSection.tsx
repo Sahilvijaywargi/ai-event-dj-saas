@@ -125,11 +125,16 @@ export function QueueIntelligenceSection({
                   </p>
                   <h3 className="mt-1 text-lg font-semibold">{recommendation.eventName}</h3>
                   <p className="mt-1 text-xs text-white/60">
-                    Latest generated:{" "}
-                    {recommendation.latestGeneratedAt
-                      ? new Date(recommendation.latestGeneratedAt).toLocaleString()
-                      : "Not generated yet"}
-                  </p>
+  Latest generated:{" "}
+  {recommendation.latestGeneratedAt
+    ? new Date(
+        recommendation.latestGeneratedAt,
+      )
+        .toISOString()
+        .replace("T", " ")
+        .slice(0, 16)
+    : "Not generated yet"}
+</p>
                   <p className="text-xs text-white/60">
                     Queue versions: {recommendation.queueVersionCount}
                   </p>

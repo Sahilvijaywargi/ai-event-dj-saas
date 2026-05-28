@@ -355,6 +355,11 @@ export async function getSpotifyAudioFeatures(
       energy: number;
       danceability: number;
       valence: number;
+      speechiness: number;
+      acousticness: number;
+      instrumentalness: number;
+      key: number;
+      mode: 0 | 1;
     }>;
   }>(accessToken, `/audio-features?ids=${ids}`);
   return (data.audio_features ?? []).filter(Boolean);

@@ -44,6 +44,37 @@ export type AIEnhancedTrackRecommendation = {
     crowdMomentumBucket: "low" | "steady" | "rising" | "surging";
     energyBucket: "very-low" | "low" | "medium" | "high" | "very-high";
   };
+  audioFeatures?: {
+    tempo: number;
+    energy: number;
+    danceability: number;
+    valence: number;
+    speechiness: number;
+    acousticness: number;
+    instrumentalness: number;
+    key: number;
+    mode: 0 | 1;
+    camelotKey: string | null;
+    vocalDensityScore: number;
+    instrumentalBlendConfidence: number;
+    crowdMomentumProjection: number;
+  };
+  structuralMetadata?: {
+    introLengthBars?: number;
+    outroLengthBars?: number;
+    phraseLength?: number;
+    dropIntensity?: number;
+    breakdownPresence?: boolean;
+    vocalSections?: number;
+    instrumentalSections?: number;
+    beatGridResolution?: number;
+    barAlignmentConfidence?: number;
+    cuePointCandidates?: number[];
+    transitionWindows?: Array<{ startBar: number; endBar: number; confidence: number }>;
+    dropTimingMarkers?: number[];
+    estimatedMixInPoint?: number;
+    estimatedMixOutPoint?: number;
+  };
   scoreBreakdown: {
     bpmCompatibility: number;
     energyCompatibility: number;

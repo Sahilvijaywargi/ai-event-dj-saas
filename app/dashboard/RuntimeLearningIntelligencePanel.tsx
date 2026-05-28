@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type RuntimeLearningSignal = {
   source: string;
@@ -74,8 +74,14 @@ export function RuntimeLearningIntelligencePanel() {
   const [isActionLoading, setIsActionLoading] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const isRefreshingRef = useRef(false);
+  const isMountedRef = useRef(true);
 
   async function refreshInsights(applyDecay = false) {
+    if (isRefreshingRef.current) return;
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+
+    isRefreshingRef.current = true;
     setIsLoading(true);
     setErrorMessage(null);
     try {
@@ -86,32 +92,21 @@ export function RuntimeLearningIntelligencePanel() {
       if (!response.ok) {
         throw new Error(data.message ?? "Failed to load runtime learning insights.");
       }
-      setInsights(data.insights ?? null);
+      if (isMountedRef.current) {
+        setInsights(data.insights ?? null);
+      }
     } catch (error) {
-      setErrorMessage(
-        error instanceof Error ? error.message : "Failed to load runtime learning insights.",
-      );
+      if (isMountedRef.current) {
+        setErrorMessage(
+          error instanceof Error ? error.message : "Failed to load runtime learning insights.",
+        );
+      }
     } finally {
-      setIsLoading(false);
+      if (isMountedRef.current) {
+        setIsLoading(false);
+      }
+      isRefreshingRef.current = false;
     }
-  }
-
-  async function refreshAudit() {
-    const response = await fetch("/api/runtime-memory/audit?limit=20");
-    const data = await response.json();
-    if (!response.ok) {
-      throw new Error(data.message ?? "Failed to load reinforcement audit.");
-    }
-    setAuditRows(data.audit ?? []);
-  }
-
-  async function refreshReversalHistory() {
-    const response = await fetch("/api/runtime-memory/reversal-history?limit=20");
-    const data = await response.json();
-    if (!response.ok) {
-      throw new Error(data.message ?? "Failed to load reversal history.");
-    }
-    setReversalRows(data.reversals ?? []);
   }
 
   async function applyAction(
@@ -135,7 +130,7 @@ export function RuntimeLearningIntelligencePanel() {
       if (!response.ok) {
         throw new Error(data.message ?? "Failed supervised reinforcement action.");
       }
-      await Promise.all([refreshInsights(false), refreshAudit()]);
+      await refreshInsights(false);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Supervised action failed.");
     } finally {
@@ -163,7 +158,7 @@ export function RuntimeLearningIntelligencePanel() {
       if (!response.ok) {
         throw new Error(data.message ?? "Failed to undo latest action.");
       }
-      await Promise.all([refreshInsights(false), refreshAudit(), refreshReversalHistory()]);
+      await Promise.all([refreshInsights(false), ]);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Undo failed.");
     } finally {
@@ -171,22 +166,22 @@ export function RuntimeLearningIntelligencePanel() {
     }
   }
 
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      void refreshInsights(false);
-      void refreshAudit();
-      void refreshReversalHistory();
-    }, 0);
-    const interval = setInterval(() => {
-      void refreshInsights(false);
-      void refreshAudit();
-      void refreshReversalHistory();
-    }, 9000);
-    return () => {
-      clearTimeout(timer);
-      clearInterval(interval);
-    };
-  }, []);
+useEffect(() => {
+  isMountedRef.current = true;
+  const timer = setTimeout(() => {
+    void refreshInsights(false);
+  }, 0);
+
+  const interval = setInterval(() => {
+    void refreshInsights(false);
+  }, 45000);
+
+  return () => {
+    isMountedRef.current = false;
+    clearTimeout(timer);
+    clearInterval(interval);
+  };
+}, []);
 
   return (
     <article

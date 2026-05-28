@@ -8,14 +8,36 @@ type AiEventPlanSectionProps = {
 };
 
 function formatEventDate(date: string) {
-  const parsed = new Date(`${date}T00:00:00`);
-  return parsed.toLocaleDateString(undefined, {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-  });
-}
+  const parsed = new Date(
+    `${date}T00:00:00`,
+  );
 
+  const weekday = parsed.toLocaleString(
+    "en-US",
+    {
+      weekday: "short",
+      timeZone: "UTC",
+    },
+  );
+
+  const month = parsed.toLocaleString(
+    "en-US",
+    {
+      month: "short",
+      timeZone: "UTC",
+    },
+  );
+
+  const day = parsed.toLocaleString(
+    "en-US",
+    {
+      day: "numeric",
+      timeZone: "UTC",
+    },
+  );
+
+  return `${weekday}, ${month} ${day}`;
+}
 export function AiEventPlanSection({ initialPlans }: AiEventPlanSectionProps) {
   const [plans, setPlans] = useState<EventPlanView[]>(initialPlans);
   const [isRefreshing, setIsRefreshing] = useState(false);

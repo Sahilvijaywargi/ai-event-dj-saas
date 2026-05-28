@@ -16,9 +16,36 @@ export function TransitionEnginePanel({ queueRecommendations }: TransitionEngine
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [executionMessage, setExecutionMessage] = useState<string | null>(null);
   const [simulation, setSimulation] = useState<TransitionSimulationResult | null>(null);
+  const [reinforcement, setReinforcement] = useState<{
+    reinforcementType: "reinforce" | "penalize" | "neutral";
+    reinforcementStrength: number;
+    reinforcementReason: string;
+    confidenceAdjustment: number;
+    riskAdjustment: number;
+    continuityScore: number;
+    stabilityScore: number;
+    orchestrationSignature: string;
+    telemetry: {
+      successfulSimulationCount: number;
+      riskySimulationCount: number;
+      strongestReinforcedSignature: string;
+      weakestOrchestrationPattern: string;
+      continuityAverage: number;
+      stabilityAverage: number;
+    };
+  } | null>(null);
 
   const flattenedCount = useMemo(
-    () => queueRecommendations.reduce((sum, item) => sum + (item.spotifyEnhancedRecommendations?.length ?? 0), 0),
+    () =>
+      queueRecommendations.reduce(
+        (sum, item) =>
+          sum +
+          Math.max(
+            item.recommendedQueue?.length ?? 0,
+            item.spotifyEnhancedRecommendations?.length ?? 0,
+          ),
+        0,
+      ),
     [queueRecommendations],
   );
 
@@ -63,6 +90,7 @@ export function TransitionEnginePanel({ queueRecommendations }: TransitionEngine
       if (!response.ok) throw new Error(data.message ?? "Transition simulation failed.");
       setEvaluation(data.evaluation ?? evaluation);
       setSimulation(data.simulation ?? null);
+      setReinforcement(data.reinforcement ?? null);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Transition simulation failed.");
     } finally {
@@ -75,18 +103,28 @@ export function TransitionEnginePanel({ queueRecommendations }: TransitionEngine
     setIsLoading(true);
     setErrorMessage(null);
     try {
+      console.log("[Frontend] before fetch");
       const response = await fetch("/api/transition-engine/execute", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ evaluation, mode }),
       });
+      console.log("[Frontend] after fetch");
+      console.log("[Frontend] before response.json");
       const data = await response.json();
+      console.log("[Frontend] after response.json");
       if (!response.ok) throw new Error(data.message ?? "Transition execution failed.");
+      console.log("[Frontend] setting state");
       setExecutionMessage(data.message ?? "Transition request completed.");
+      console.log("[Frontend] done");
     } catch (error) {
+      console.log("[Frontend] setting state");
       setErrorMessage(error instanceof Error ? error.message : "Transition execution failed.");
+      console.log("[Frontend] done");
     } finally {
+      console.log("[Frontend] setting state");
       setIsLoading(false);
+      console.log("[Frontend] done");
     }
   }
 
@@ -193,6 +231,30 @@ export function TransitionEnginePanel({ queueRecommendations }: TransitionEngine
 
       {simulation ? (
         <div className="mt-4 space-y-3">
+          {reinforcement ? (
+            <div className="rounded-xl border border-white/10 bg-black/35 p-3 text-sm text-white/85">
+              <p className="text-xs uppercase tracking-widest text-white/60">Simulation Reinforcement</p>
+              <p className="mt-1">
+                Type/Strength: {reinforcement.reinforcementType} / {reinforcement.reinforcementStrength.toFixed(3)}
+              </p>
+              <p>
+                Continuity/Stability: {reinforcement.continuityScore.toFixed(2)} / {reinforcement.stabilityScore.toFixed(2)}
+              </p>
+              <p>
+                Confidence/Risk Adj: {reinforcement.confidenceAdjustment.toFixed(2)} /{" "}
+                {reinforcement.riskAdjustment.toFixed(2)}
+              </p>
+              <p className="mt-1 text-white/70">Reason: {reinforcement.reinforcementReason}</p>
+              <p className="text-xs text-white/60">
+                Success/Risky Count: {reinforcement.telemetry.successfulSimulationCount} /{" "}
+                {reinforcement.telemetry.riskySimulationCount}
+              </p>
+              <p className="text-xs text-white/60">
+                Strongest/Weakest: {reinforcement.telemetry.strongestReinforcedSignature} /{" "}
+                {reinforcement.telemetry.weakestOrchestrationPattern}
+              </p>
+            </div>
+          ) : null}
           <div className="rounded-xl border border-white/10 bg-black/35 p-3 text-sm text-white/85">
             <p className="text-xs uppercase tracking-widest text-white/60">Simulation Timeline</p>
             <div className="mt-2 space-y-2">

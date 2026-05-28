@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type LoopState = {
   status: "stopped" | "running";
@@ -30,21 +30,33 @@ export function AutonomousRuntimePanel() {
   const [supervisionMode, setSupervisionMode] = useState<"manual_override" | "assisted_autonomous">(
     "manual_override",
   );
+  const isRefreshingRef = useRef(false);
+  const isMountedRef = useRef(true);
 
   async function refreshState() {
+    if (isRefreshingRef.current) return;
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+
+    isRefreshingRef.current = true;
     try {
       const response = await fetch("/api/autonomous-loop/state");
       const data = await response.json();
       if (!response.ok) throw new Error(data.message ?? "Failed to load autonomous runtime state.");
-      setState(data.state ?? null);
-      if (data.state?.supervisionMode) {
-        setSupervisionMode(data.state.supervisionMode);
-      }
-      if (typeof data.state?.intervalMs === "number") {
-        setIntervalMs(data.state.intervalMs);
+      if (isMountedRef.current) {
+        setState(data.state ?? null);
+        if (data.state?.supervisionMode) {
+          setSupervisionMode(data.state.supervisionMode);
+        }
+        if (typeof data.state?.intervalMs === "number") {
+          setIntervalMs(data.state.intervalMs);
+        }
       }
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Failed to load autonomous runtime state.");
+      if (isMountedRef.current) {
+        setErrorMessage(error instanceof Error ? error.message : "Failed to load autonomous runtime state.");
+      }
+    } finally {
+      isRefreshingRef.current = false;
     }
   }
 
@@ -102,13 +114,15 @@ export function AutonomousRuntimePanel() {
   }
 
   useEffect(() => {
+    isMountedRef.current = true;
     const timer = setTimeout(() => {
       void refreshState();
     }, 0);
     const polling = setInterval(() => {
       void refreshState();
-    }, 6000);
+    }, 30000);
     return () => {
+      isMountedRef.current = false;
       clearTimeout(timer);
       clearInterval(polling);
     };
@@ -220,7 +234,9 @@ export function AutonomousRuntimePanel() {
             {(state?.tickHistory ?? []).slice(0, 6).map((tick, index) => (
               <div key={`${tick.tickAt}-${index}`} className="rounded-lg border border-white/10 bg-black/25 p-2">
                 <p>
-                  {new Date(tick.tickAt).toLocaleTimeString()} - {tick.decision} ({tick.confidence}% / {tick.riskLevel})
+                {new Date(tick.tickAt)
+  .toISOString()
+  .slice(11, 16)} - {tick.decision} ({tick.confidence}% / {tick.riskLevel})
                 </p>
                 <p className="text-white/70">{tick.message}</p>
               </div>

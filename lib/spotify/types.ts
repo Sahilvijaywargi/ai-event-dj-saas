@@ -46,6 +46,11 @@ export type SpotifyAudioFeatures = {
   energy: number;
   danceability: number;
   valence: number;
+  speechiness: number;
+  acousticness: number;
+  instrumentalness: number;
+  key: number;
+  mode: 0 | 1;
 };
 
 export type SpotifyRecommendation = {

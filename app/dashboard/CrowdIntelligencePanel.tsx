@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type CrowdFeedbackTimelineItem = {
   id: string;
@@ -23,30 +23,45 @@ export function CrowdIntelligencePanel() {
   const [summary, setSummary] = useState<CrowdSummary | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const isRefreshingRef = useRef(false);
+  const isMountedRef = useRef(true);
 
   async function refreshSummary() {
+    if (isRefreshingRef.current) return;
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+
+    isRefreshingRef.current = true;
     setIsLoading(true);
     setErrorMessage(null);
     try {
       const response = await fetch("/api/crowd-feedback/summary?limit=80");
       const data = await response.json();
       if (!response.ok) throw new Error(data.message ?? "Failed to load crowd intelligence.");
-      setSummary(data.summary ?? null);
+      if (isMountedRef.current) {
+        setSummary(data.summary ?? null);
+      }
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Failed to load crowd intelligence.");
+      if (isMountedRef.current) {
+        setErrorMessage(error instanceof Error ? error.message : "Failed to load crowd intelligence.");
+      }
     } finally {
-      setIsLoading(false);
+      if (isMountedRef.current) {
+        setIsLoading(false);
+      }
+      isRefreshingRef.current = false;
     }
   }
 
   useEffect(() => {
+    isMountedRef.current = true;
     const timer = setTimeout(() => {
       void refreshSummary();
     }, 0);
     const interval = setInterval(() => {
       void refreshSummary();
-    }, 8000);
+    }, 30000);
     return () => {
+      isMountedRef.current = false;
       clearTimeout(timer);
       clearInterval(interval);
     };

@@ -72,6 +72,7 @@ export function AiSpotifyRecommendationsPanel({
     useState<Record<string, ServedMeta>>({});
 
   const isMountedRef = useRef(false);
+  const isPollingRef = useRef(false);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -188,6 +189,10 @@ export function AiSpotifyRecommendationsPanel({
   }
 
   async function pollDiagnostics() {
+    if (isPollingRef.current) return;
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+
+    isPollingRef.current = true;
     try {
       const response = await fetch(
         "/api/spotify/ai-recommendations/diagnostics",
@@ -218,6 +223,8 @@ export function AiSpotifyRecommendationsPanel({
       }
     } catch {
       // best-effort polling only
+    } finally {
+      isPollingRef.current = false;
     }
   }
 
@@ -226,7 +233,7 @@ export function AiSpotifyRecommendationsPanel({
 
     const timer = setInterval(() => {
       void pollDiagnostics();
-    }, 8000);
+    }, 30000);
 
     return () => clearInterval(timer);
   }, []);

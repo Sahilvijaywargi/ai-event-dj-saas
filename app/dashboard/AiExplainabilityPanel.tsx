@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type SectionExplanation = {
   decisionReason: string;
@@ -25,16 +25,20 @@ export function AiExplainabilityPanel() {
   const [autonomous, setAutonomous] = useState<SectionExplanation | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const isRefreshingRef = useRef(false);
+  const isMountedRef = useRef(true);
 
   async function refreshExplainability() {
+    if (isRefreshingRef.current) return;
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+
+    isRefreshingRef.current = true;
     setIsLoading(true);
     setErrorMessage(null);
     try {
-      const [runtimeRes, transitionRes, loopRes] = await Promise.all([
-        fetch("/api/explainability/runtime"),
-        fetch("/api/explainability/transition?assisted=true"),
-        fetch("/api/explainability/autonomous-loop"),
-      ]);
+      const runtimeRes = await fetch("/api/explainability/runtime");
+      const transitionRes = await fetch("/api/explainability/transition?assisted=true");
+      const loopRes = await fetch("/api/explainability/autonomous-loop");
       const runtimeData = await runtimeRes.json();
       const transitionData = await transitionRes.json();
       const loopData = await loopRes.json();
@@ -43,24 +47,33 @@ export function AiExplainabilityPanel() {
         throw new Error(transitionData.message ?? "Transition explainability failed.");
       if (!loopRes.ok) throw new Error(loopData.message ?? "Autonomous explainability failed.");
 
-      setRuntime(runtimeData.explanation ?? null);
-      setTransition(transitionData.explanation ?? null);
-      setAutonomous(loopData.explanation ?? null);
+      if (isMountedRef.current) {
+        setRuntime(runtimeData.explanation ?? null);
+        setTransition(transitionData.explanation ?? null);
+        setAutonomous(loopData.explanation ?? null);
+      }
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Failed to load explainability.");
+      if (isMountedRef.current) {
+        setErrorMessage(error instanceof Error ? error.message : "Failed to load explainability.");
+      }
     } finally {
-      setIsLoading(false);
+      if (isMountedRef.current) {
+        setIsLoading(false);
+      }
+      isRefreshingRef.current = false;
     }
   }
 
   useEffect(() => {
+    isMountedRef.current = true;
     const timer = setTimeout(() => {
       void refreshExplainability();
     }, 0);
     const polling = setInterval(() => {
       void refreshExplainability();
-    }, 8000);
+    }, 30000);
     return () => {
+      isMountedRef.current = false;
       clearTimeout(timer);
       clearInterval(polling);
     };

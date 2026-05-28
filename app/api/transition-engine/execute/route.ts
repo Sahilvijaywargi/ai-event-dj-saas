@@ -11,32 +11,50 @@ type Body = {
 };
 
 export async function POST(request: Request) {
-  const supabase = await createSupabaseServerClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
-
-  let body: Body = {};
   try {
-    body = (await request.json()) as Body;
-  } catch {
-    body = {};
-  }
-  if (!body.evaluation) {
-    return NextResponse.json({ message: "evaluation is required." }, { status: 400 });
-  }
+    const supabase = await createSupabaseServerClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      const unauthorized = NextResponse.json({ message: "Unauthorized" }, { status: 401 });
+      console.log("[ReviewRoute] before response");
+      console.log("[ReviewRoute] after response");
+      return unauthorized;
+    }
 
-  try {
+    let body: Body = {};
+    try {
+      body = (await request.json()) as Body;
+    } catch {
+      body = {};
+    }
+    if (!body.evaluation) {
+      const badRequest = NextResponse.json({ message: "evaluation is required." }, { status: 400 });
+      console.log("[ReviewRoute] before response");
+      console.log("[ReviewRoute] after response");
+      return badRequest;
+    }
+
+    console.log("[ReviewRoute] before evaluate");
+    console.log("[ReviewRoute] after evaluate");
+
+    console.log("[ReviewRoute] before execute");
     const result = await executeTransitionEnginePlan({
       userId: user.id,
       evaluation: body.evaluation,
       mode: body.mode ?? "review_only",
     });
-    return NextResponse.json(result, { status: result.ok ? 200 : 409 });
+    console.log("[ReviewRoute] after execute");
+
+    console.log("[ReviewRoute] before response");
+    const response = NextResponse.json(result, { status: result.ok ? 200 : 409 });
+    console.log("[ReviewRoute] after response");
+    return response;
   } catch (error) {
+    console.error("[ReviewRoute] fatal", error);
     return NextResponse.json(
-      { message: error instanceof Error ? error.message : "Failed to execute transition plan." },
+      { ok: false, error: String(error) },
       { status: 500 },
     );
   }
