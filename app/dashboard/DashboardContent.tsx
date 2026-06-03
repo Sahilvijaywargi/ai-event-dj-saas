@@ -17,6 +17,7 @@ import { AudioEnergyIntelligencePanel } from "@/app/dashboard/AudioEnergyIntelli
 import { RuntimeIntelligenceCoordinatorPanel } from "@/app/dashboard/RuntimeIntelligenceCoordinatorPanel";
 import { AiExplainabilityPanel } from "@/app/dashboard/AiExplainabilityPanel";
 import { RuntimeLearningIntelligencePanel } from "@/app/dashboard/RuntimeLearningIntelligencePanel";
+import { LivePlaybackExecutionPanel } from "@/app/dashboard/LivePlaybackExecutionPanel";
 import { QaReadinessPill } from "@/app/qa/QaReadinessPill";
 import { QueueRecommendationWithMeta } from "@/lib/ai/queue-engine";
 import { DjSessionRecord, SessionActivityRecord } from "@/lib/dj-session/types";
@@ -129,6 +130,7 @@ export function DashboardContent({
       <QueueIntelligenceSection initialRecommendations={queueRecommendations} />
       <AiSpotifyRecommendationsPanel initialRecommendations={queueRecommendations} />
       <TransitionEnginePanel queueRecommendations={queueRecommendations} />
+      <LivePlaybackExecutionPanel queueRecommendations={queueRecommendations} />
       <RuntimeIntelligenceCoordinatorPanel />
       <RuntimeLearningIntelligencePanel />
       <AiExplainabilityPanel />

@@ -85,6 +85,18 @@ export type SpotifyPlaybackState = {
   shuffleState: boolean;
 };
 
+export type SpotifyQueueTrack = {
+  id: string | null;
+  uri: string | null;
+  name: string;
+  artistName: string;
+};
+
+export type SpotifyQueueState = {
+  currentlyPlaying: SpotifyQueueTrack | null;
+  queue: SpotifyQueueTrack[];
+};
+
 export type PlaybackCommandResult = {
   ok: boolean;
   message: string | null;

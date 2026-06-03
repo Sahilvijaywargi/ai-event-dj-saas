@@ -4,6 +4,7 @@ import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 type Body = {
   assistedAutonomousEnabled?: boolean;
+  operatorInterrupt?: boolean;
 };
 
 export async function POST(request: Request) {
@@ -24,6 +25,7 @@ export async function POST(request: Request) {
     const state = await evaluateRuntimeIntelligence({
       userId: user.id,
       assistedAutonomousEnabled: body.assistedAutonomousEnabled ?? false,
+      operatorInterrupt: body.operatorInterrupt ?? false,
     });
     return NextResponse.json({ state });
   } catch (error) {

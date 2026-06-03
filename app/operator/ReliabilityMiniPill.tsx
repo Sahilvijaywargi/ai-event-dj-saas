@@ -27,6 +27,7 @@ export type ReliabilityMiniState = {
 
 type ReliabilityMiniPillProps = {
   reliability: ReliabilityMiniState | null;
+  telemetryReady?: boolean;
   onReconnect: () => void;
   onResync: () => void;
   busy?: boolean;
@@ -42,6 +43,7 @@ function formatAge(lastHeartbeatAt: string | null) {
 
 export function ReliabilityMiniPill({
   reliability,
+  telemetryReady = true,
   onReconnect,
   onResync,
   busy = false,
@@ -149,8 +151,8 @@ export function ReliabilityMiniPill({
         aria-controls="reliability-mini-sheet"
       >
         {status}
-        <span className="ml-2 text-[10px] normal-case opacity-85">
-          hb {formatAge(reliability?.heartbeat.lastHeartbeatAt ?? null)}
+        <span className="ml-2 text-[10px] normal-case opacity-85" suppressHydrationWarning>
+          hb {telemetryReady ? formatAge(reliability?.heartbeat.lastHeartbeatAt ?? null) : "—"}
         </span>
       </button>
 

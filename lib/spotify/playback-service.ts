@@ -3,9 +3,10 @@ import "server-only";
 import {
   PlaybackCommandResult,
   SpotifyDevice,
+  SpotifyQueueState,
   SpotifyPlaybackState,
 } from "@/lib/spotify/types";
-import { getValidSpotifyAccessToken } from "@/lib/spotify/service";
+import { ensureSpotifyTransportAuth, getValidSpotifyAccessToken } from "@/lib/spotify/service";
 
 const SPOTIFY_API_BASE = "https://api.spotify.com/v1";
 
@@ -19,6 +20,15 @@ async function spotifyPlaybackRequest<T>(
   options?: RequestInit,
   expectJson = true,
 ): Promise<T> {
+  const auth = await ensureSpotifyTransportAuth({
+    userId,
+    minValidityMs: 90_000,
+    supervisedExecutionActive: true,
+    reason: `playback_request:${path}`,
+  });
+  if (!auth.ok) {
+    throw new Error("Spotify playback blocked due to auth expiry.");
+  }
   const accessToken = await getValidSpotifyAccessToken(userId);
   let lastError: unknown = null;
   for (let attempt = 0; attempt <= 1; attempt += 1) {
@@ -150,6 +160,44 @@ export async function queueSpotifyTrack(params: {
   if (params.deviceId) query.set("device_id", params.deviceId);
   await spotifyPlaybackRequest<void>(params.userId, `/me/player/queue?${query.toString()}`, { method: "POST" }, false);
   return { ok: true, message: null };
+}
+
+export async function getSpotifyQueueState(userId: string): Promise<SpotifyQueueState | null> {
+  try {
+    const raw = await spotifyPlaybackRequest<{
+      currently_playing: {
+        id: string | null;
+        uri: string | null;
+        name: string;
+        artists: Array<{ name: string }>;
+      } | null;
+      queue: Array<{
+        id: string | null;
+        uri: string | null;
+        name: string;
+        artists: Array<{ name: string }>;
+      }>;
+    }>(userId, "/me/player/queue");
+    return {
+      currentlyPlaying: raw.currently_playing
+        ? {
+            id: raw.currently_playing.id,
+            uri: raw.currently_playing.uri,
+            name: raw.currently_playing.name,
+            artistName: raw.currently_playing.artists?.[0]?.name ?? "Unknown Artist",
+          }
+        : null,
+      queue:
+        raw.queue?.map((track) => ({
+          id: track.id,
+          uri: track.uri,
+          name: track.name,
+          artistName: track.artists?.[0]?.name ?? "Unknown Artist",
+        })) ?? [],
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function setSpotifyVolume(params: {

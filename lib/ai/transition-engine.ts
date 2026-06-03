@@ -10,13 +10,42 @@ import { executeGuardedPlaybackCommand } from "@/lib/spotify/playback-guarded";
 import { startSpotifyPlayback } from "@/lib/spotify/playback-service";
 import { serveRecommendationDiagnostics } from "@/lib/spotify/diagnostics-serving";
 import {
+  evaluateTelemetryFreshness,
+  refreshDeviceHeartbeat,
+  refreshPlaybackHeartbeat,
+  refreshQueueHeartbeat,
+} from "@/lib/runtime/telemetry-heartbeat";
+import {
   computeLearnedOrchestrationBias,
   getRuntimeMemoryPatterns,
   RuntimeMemoryPattern,
   storeRuntimeMemoryPattern,
 } from "@/lib/ai/runtime-memory";
+import {
+  analyzeTransitionCompatibility,
+  TrackPhraseProfile,
+  TransitionCompatibilityResult,
+} from "@/lib/ai/transition-patterns";
+import {
+  applyTransitionLearningObservation,
+  computeCrowdAdaptationBias,
+  computeExecutionStabilityBias,
+  computeRecoveryLearningBias,
+  computeTransitionLearningBias,
+  createDefaultTransitionLearningProfile,
+} from "@/lib/ai/transition-learning";
 
 export type TransitionRiskLevel = "low" | "medium" | "high";
+export type ExecutionStrategy =
+  | "smooth_blend"
+  | "harmonic_overlay"
+  | "vocal_guarded_transition"
+  | "percussive_swap"
+  | "fast_cut"
+  | "energy_ramp_blend"
+  | "hold_state";
+export type ExecutionReadinessState = "ready" | "prepare" | "guarded" | "blocked";
+export type ExecutionWindowState = "stable_window" | "narrow_window" | "unstable_window" | "expired_window";
 export type CamelotCompatibility = "unknown" | "match" | "adjacent" | "relative" | "distant";
 export type TransitionConfidence = {
   score: number;
@@ -32,12 +61,30 @@ export type TransitionDecision = {
 };
 
 export type TransitionExecutionPlan = {
-  nextAction: "queue_next_track" | "advance_playback" | "hold_state" | "reject_unsafe_transition";
+  nextAction:
+    | "queue_next_track"
+    | "advance_playback"
+    | "hold_state"
+    | "reject_unsafe_transition"
+    | "prepare_fast_swap"
+    | "guarded_transition"
+    | "prepare_queue"
+    | "prepare_execution_window"
+    | "refresh_transport_state"
+    | "recover_playback_sync";
   targetTrackId: string | null;
   targetTrackLabel: string | null;
   targetPhase: string;
   targetEnergy: number;
   targetBpm: number;
+  blendDuration: "none" | "short" | "controlled" | "long";
+  transitionStyle: "continuous" | "aggressive" | "vocal_safe" | "recovery";
+};
+
+type PlaybackOrchestrationState = {
+  activeDevice: { id: string; is_restricted?: boolean } | null;
+  playbackState: { isPlaying?: boolean; progressMs?: number } | null;
+  queueStatus?: { syncStatus?: string } | null;
 };
 
 type RuntimeCandidateTrack = QueueTrack & {
@@ -104,6 +151,119 @@ export type TransitionEvaluationResult = {
     confidenceBias: number;
     rationale: string[];
   };
+  executionStrategy: ExecutionStrategy;
+  executionStrategyReasoning: string[];
+  transitionAggressiveness: number;
+  transitionComplexity: number;
+  operatorAttentionRequired: boolean;
+  executionReadiness: ExecutionReadinessState;
+  executionReadinessScore: number;
+  executionBlockers: string[];
+  transportStability: number;
+  cuePreparationConfidence: number;
+  rollbackReadiness: number;
+  deviceSynchronizationConfidence: number;
+  executionWindowState: ExecutionWindowState;
+  estimatedCueLeadTime: number;
+  blendEntryConfidence: number;
+  rollbackSafetyMargin: number;
+  playbackFreshnessAgeMs: number;
+  heartbeatContinuity: number;
+  heartbeatDrift: number;
+  freshnessRecoveryState: "stable" | "recovering" | "degraded";
+  graceStabilizationActive: boolean;
+  currentPhrasePosition: number;
+  currentPhraseLength: number;
+  phraseAlignmentConfidence: number;
+  phraseTransitionWindow: "intro" | "buildup" | "phrase_boundary" | "chorus" | "outro" | "unstable";
+  phraseMomentum: number;
+  phraseStability: number;
+  phraseTimingRisk: number;
+  transitionPressure: number;
+  transitionTimingConfidence: number;
+  phraseHistory: Array<{
+    timestamp: number;
+    phrasePosition: number;
+    alignmentConfidence: number;
+    momentum: number;
+    stability: number;
+    timingRisk: number;
+    transitionWindow: "intro" | "buildup" | "phrase_boundary" | "chorus" | "outro" | "unstable";
+  }>;
+  transitionPressureHistory: Array<{ timestamp: number; pressure: number; reason: string }>;
+  phraseTimingReasoning: string[];
+  harmonicCompatibility: number;
+  emotionalContinuity: number;
+  tonalStability: number;
+  emotionalMomentum: number;
+  harmonicTension: number;
+  emotionalTransitionRisk: number;
+  crowdEmotionalAlignment: number;
+  emotionalEnergyDrift: number;
+  harmonicResolutionConfidence: number;
+  harmonicHistory: Array<{ timestamp: number; harmonicCompatibility: number; tonalStability: number; resolutionConfidence: number }>;
+  emotionalMomentumHistory: Array<{ timestamp: number; momentum: number; continuity: number; crowdAlignment: number }>;
+  harmonicTensionHistory: Array<{ timestamp: number; tension: number; emotionalRisk: number; reason: string }>;
+  harmonicEmotionReasoning: string[];
+  crowdEnergyState: "rising" | "stable" | "saturated" | "fatigued" | "recovering" | "unstable";
+  crowdMomentumScore: number;
+  crowdFatiguePressure: number;
+  crowdRecoveryState: "stable" | "recovering" | "degraded";
+  crowdEngagementConfidence: number;
+  crowdEnergyVolatility: number;
+  crowdHypeSaturation: number;
+  crowdRecoveryConfidence: number;
+  crowdAdaptationConfidence: number;
+  crowdMomentumHistory: Array<{ timestamp: number; momentum: number; engagement: number; adaptationConfidence: number }>;
+  crowdFatigueHistory: Array<{ timestamp: number; pressure: number; state: "rising" | "stable" | "saturated" | "fatigued" | "recovering" | "unstable" }>;
+  crowdRecoveryHistory: Array<{ timestamp: number; recoveryConfidence: number; recoveryState: "stable" | "recovering" | "degraded" }>;
+  crowdVolatilityHistory: Array<{ timestamp: number; volatility: number; hypeSaturation: number }>;
+  crowdAdaptationReasoning: string[];
+  narrativeFlowState: "build" | "rise" | "peak" | "sustain" | "release" | "recovery" | "unstable";
+  narrativeMomentum: number;
+  narrativeTension: number;
+  narrativeRecoveryPressure: number;
+  narrativeProgressionConfidence: number;
+  narrativeContinuity: number;
+  narrativeEnergyArc: number;
+  narrativeResolutionConfidence: number;
+  narrativeFatigueRisk: number;
+  narrativeJourneyAlignment: number;
+  narrativeMomentumHistory: Array<{ timestamp: number; momentum: number; continuity: number; progression: number }>;
+  narrativeTensionHistory: Array<{ timestamp: number; tension: number; state: "build" | "rise" | "peak" | "sustain" | "release" | "recovery" | "unstable" }>;
+  narrativeRecoveryHistory: Array<{ timestamp: number; recoveryPressure: number; resolutionConfidence: number; state: "build" | "rise" | "peak" | "sustain" | "release" | "recovery" | "unstable" }>;
+  narrativeEnergyArcHistory: Array<{ timestamp: number; energyArc: number; fatigueRisk: number; journeyAlignment: number }>;
+  narrativeReasoning: string[];
+  cadenceState: "restrained" | "balanced" | "escalating" | "aggressive" | "saturated" | "recovering" | "unstable";
+  cadenceDensity: number;
+  cadenceAggression: number;
+  cadenceRecoverySpacing: number;
+  cadenceEscalationPressure: number;
+  cadenceBreathingRoom: number;
+  cadenceStability: number;
+  cadenceAdaptationConfidence: number;
+  cadenceFatigueLoad: number;
+  cadenceNarrativeBalance: number;
+  cadenceDensityHistory: Array<{ timestamp: number; density: number; state: "restrained" | "balanced" | "escalating" | "aggressive" | "saturated" | "recovering" | "unstable" }>;
+  cadenceAggressionHistory: Array<{ timestamp: number; aggression: number; escalationPressure: number }>;
+  cadenceRecoveryHistory: Array<{ timestamp: number; recoverySpacing: number; breathingRoom: number }>;
+  cadenceStabilityHistory: Array<{ timestamp: number; stability: number; adaptationConfidence: number; fatigueLoad: number }>;
+  cadenceReasoning: string[];
+  orchestrationBalanceScore: number;
+  orchestrationConflictPressure: number;
+  orchestrationStability: number;
+  orchestrationAlignment: number;
+  orchestrationRecoveryPriority: number;
+  orchestrationEscalationPriority: number;
+  orchestrationContinuityPriority: number;
+  orchestrationFatiguePriority: number;
+  orchestrationNarrativePriority: number;
+  orchestrationSynthesisConfidence: number;
+  orchestrationBalanceHistory: Array<{ timestamp: number; balance: number; confidence: number }>;
+  orchestrationConflictHistory: Array<{ timestamp: number; conflictPressure: number; recoveryPriority: number; escalationPriority: number }>;
+  orchestrationAlignmentHistory: Array<{ timestamp: number; alignment: number; continuityPriority: number; narrativePriority: number }>;
+  orchestrationStabilityHistory: Array<{ timestamp: number; stability: number; fatiguePriority: number; synthesisConfidence: number }>;
+  orchestrationSynthesisReasoning: string[];
 
   transitionDiagnostics: {
     bpmCompatibilityScore: number;
@@ -150,18 +310,50 @@ export type TransitionEvaluationResult = {
 
     downbeatAlignmentQuality: "high" | "medium" | "low";
 
-    transitionExecutionStyle:
-      | "smooth_blend"
-      | "fast_cut"
-      | "percussive_swap"
-      | "harmonic_overlay"
-      | "vocal_guarded_transition";
+    transitionExecutionStyle: ExecutionStrategy;
 
     transitionSignature: string | null;
 
     memoryConfidenceBias: number;
 
     memoryRiskDelta: number;
+
+    learningConfidenceBias: number;
+
+    learningRiskBias: number;
+
+    stabilizationPriority: number;
+
+    escalationClamp: number;
+
+    learningReasons: string[];
+
+    compatibilityScore: number;
+
+    compatibilityHarmonicScore: number;
+
+    compatibilityPhraseAlignmentScore: number;
+
+    compatibilityVocalClashScore: number;
+
+    compatibilityEnergyFlowScore: number;
+
+    compatibilityTensionContinuityScore: number;
+
+    recommendedArchetype:
+      | "smooth_blend"
+      | "fast_cut"
+      | "echo_exit"
+      | "tension_swap"
+      | "energy_slam"
+      | "vocal_swap"
+      | "halftime_reset"
+      | "atmospheric_bridge"
+      | "percussion_overlay";
+
+    compatibilityRiskLevel: "safe" | "moderate" | "risky" | "dangerous";
+
+    compatibilityReasoning: string[];
 
     transitionReasoning: string[];
   };
@@ -350,6 +542,39 @@ function scoreVocalClash(
   return 90;
 }
 
+function derivePhraseSection(params: {
+  phase: string | null;
+  speechiness?: number | null;
+  instrumentalness?: number | null;
+  energy?: number | null;
+  valence?: number | null;
+  dropIntensity?: number | null;
+  breakdownPresence?: boolean | null;
+}): TrackPhraseProfile["phraseSection"] {
+  const phase = (params.phase ?? "").toLowerCase();
+  const speechiness = params.speechiness ?? 0.2;
+  const instrumentalness = params.instrumentalness ?? 0.35;
+  const energy = params.energy ?? 5;
+  const valence = params.valence ?? 0.5;
+  const dropIntensity = params.dropIntensity ?? 5;
+  if (phase.includes("warmup")) return "intro";
+  if (phase.includes("cooldown") || phase.includes("closing")) return "outro";
+  if (params.breakdownPresence || (instrumentalness >= 0.6 && energy <= 5.5)) return "breakdown";
+  if (dropIntensity >= 7.2 && energy >= 7) return "drop";
+  if (energy >= 6.4 && valence >= 0.55) return "buildup";
+  if (speechiness >= 0.38) return "verse";
+  if (instrumentalness >= 0.5) return "bridge";
+  return "verse";
+}
+
+function deriveVocalDensity(speechiness?: number | null): TrackPhraseProfile["vocalDensity"] {
+  const s = speechiness ?? 0.2;
+  if (s < 0.14) return "none";
+  if (s < 0.28) return "light";
+  if (s < 0.44) return "medium";
+  return "heavy";
+}
+
 function computeTransitionBlendScore(params: {
   bpmScore: number;
   energyScore: number;
@@ -506,6 +731,1357 @@ function scoreBeatGridSynchronization(params: {
   };
 }
 
+const phraseTimingStore = new Map<
+  string,
+  {
+    phraseHistory: TransitionEvaluationResult["phraseHistory"];
+    transitionPressureHistory: TransitionEvaluationResult["transitionPressureHistory"];
+    transitionPressure: number;
+  }
+>();
+
+const harmonicEmotionStore = new Map<
+  string,
+  {
+    harmonicHistory: TransitionEvaluationResult["harmonicHistory"];
+    emotionalMomentumHistory: TransitionEvaluationResult["emotionalMomentumHistory"];
+    harmonicTensionHistory: TransitionEvaluationResult["harmonicTensionHistory"];
+    unresolvedTransitionCount: number;
+  }
+>();
+
+const crowdAdaptationStore = new Map<
+  string,
+  {
+    crowdMomentumHistory: TransitionEvaluationResult["crowdMomentumHistory"];
+    crowdFatigueHistory: TransitionEvaluationResult["crowdFatigueHistory"];
+    crowdRecoveryHistory: TransitionEvaluationResult["crowdRecoveryHistory"];
+    crowdVolatilityHistory: TransitionEvaluationResult["crowdVolatilityHistory"];
+    fatiguePressure: number;
+  }
+>();
+
+const narrativeFlowStore = new Map<
+  string,
+  {
+    narrativeMomentumHistory: TransitionEvaluationResult["narrativeMomentumHistory"];
+    narrativeTensionHistory: TransitionEvaluationResult["narrativeTensionHistory"];
+    narrativeRecoveryHistory: TransitionEvaluationResult["narrativeRecoveryHistory"];
+    narrativeEnergyArcHistory: TransitionEvaluationResult["narrativeEnergyArcHistory"];
+    narrativeFlowState: TransitionEvaluationResult["narrativeFlowState"];
+    lastStateChangedAt: number;
+  }
+>();
+
+const adaptiveCadenceStore = new Map<
+  string,
+  {
+    cadenceDensityHistory: TransitionEvaluationResult["cadenceDensityHistory"];
+    cadenceAggressionHistory: TransitionEvaluationResult["cadenceAggressionHistory"];
+    cadenceRecoveryHistory: TransitionEvaluationResult["cadenceRecoveryHistory"];
+    cadenceStabilityHistory: TransitionEvaluationResult["cadenceStabilityHistory"];
+    cadenceState: TransitionEvaluationResult["cadenceState"];
+    cadenceEscalationPressure: number;
+    lastStateChangedAt: number;
+  }
+>();
+
+const orchestrationSynthesisStore = new Map<
+  string,
+  {
+    orchestrationBalanceHistory: TransitionEvaluationResult["orchestrationBalanceHistory"];
+    orchestrationConflictHistory: TransitionEvaluationResult["orchestrationConflictHistory"];
+    orchestrationAlignmentHistory: TransitionEvaluationResult["orchestrationAlignmentHistory"];
+    orchestrationStabilityHistory: TransitionEvaluationResult["orchestrationStabilityHistory"];
+    orchestrationRecoveryPriority: number;
+    orchestrationEscalationPriority: number;
+    orchestrationContinuityPriority: number;
+    orchestrationFatiguePriority: number;
+    orchestrationNarrativePriority: number;
+  }
+>();
+
+function boundedPush<T>(list: T[], next: T, max = 32) {
+  const merged = [...list, next];
+  return merged.length > max ? merged.slice(merged.length - max) : merged;
+}
+
+function evaluatePhraseTiming(params: {
+  userId: string;
+  playbackProgressMs: number;
+  bpm: number;
+  energy: number;
+  transitionAggressiveness: number;
+  executionWindowState: ExecutionWindowState;
+  playbackFreshnessAgeMs: number;
+  runtimeConvergenceScore: number;
+  crowdMomentumProjection?: number;
+  phraseLengthHint?: number | null;
+  phraseRisk?: "safe" | "watch" | "risky";
+  vocalOverlapRisk?: number;
+  heartbeatDrift?: number;
+}) {
+  const now = Date.now();
+  const previous = phraseTimingStore.get(params.userId) ?? {
+    phraseHistory: [],
+    transitionPressureHistory: [],
+    transitionPressure: 28,
+  };
+  const phraseLength = clamp(params.phraseLengthHint ?? 32, 16, 64);
+  const beatMs = 60_000 / Math.max(1, params.bpm);
+  const barMs = beatMs * 4;
+  const phraseDurationMs = barMs * phraseLength;
+  const phrasePosition = Number(
+    clamp(((params.playbackProgressMs % phraseDurationMs) / Math.max(phraseDurationMs, 1)) * 100, 0, 100).toFixed(2),
+  );
+  const phraseTransitionWindow: TransitionEvaluationResult["phraseTransitionWindow"] =
+    params.executionWindowState === "unstable_window" || params.executionWindowState === "expired_window"
+      ? "unstable"
+      : phrasePosition < 14
+        ? "intro"
+        : phrasePosition < 34
+          ? "buildup"
+          : phrasePosition >= 46 && phrasePosition <= 54
+            ? "phrase_boundary"
+            : phrasePosition < 78
+              ? "chorus"
+              : "outro";
+  const windowBoost =
+    phraseTransitionWindow === "phrase_boundary"
+      ? 20
+      : phraseTransitionWindow === "outro"
+        ? 14
+        : phraseTransitionWindow === "buildup" && phrasePosition >= 28
+          ? 10
+          : phraseTransitionWindow === "unstable"
+            ? -20
+            : 0;
+  const phraseAlignmentConfidence = Number(
+    clamp(
+      params.runtimeConvergenceScore * 0.3 +
+        (100 - Math.min(100, params.playbackFreshnessAgeMs / 300)) * 0.2 +
+        (params.executionWindowState === "stable_window" ? 88 : params.executionWindowState === "narrow_window" ? 68 : 35) *
+          0.2 +
+        (100 - (params.vocalOverlapRisk ?? 42)) * 0.12 +
+        (params.phraseRisk === "safe" ? 86 : params.phraseRisk === "watch" ? 64 : 36) * 0.18 +
+        windowBoost,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const phraseMomentum = Number(
+    clamp(
+      params.energy * 8 * 0.45 +
+        (params.crowdMomentumProjection ?? 50) * 0.45 +
+        (phraseTransitionWindow === "buildup" || phraseTransitionWindow === "chorus" ? 6 : 0),
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const phraseStability = Number(
+    clamp(
+      phraseAlignmentConfidence * 0.42 +
+        (100 - (params.heartbeatDrift ?? 25)) * 0.18 +
+        (params.executionWindowState === "stable_window" ? 88 : params.executionWindowState === "narrow_window" ? 62 : 34) *
+          0.24 +
+        (params.runtimeConvergenceScore * 0.16),
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const staleFreshnessRecurring =
+    previous.phraseHistory.slice(-3).filter((entry) => entry.timingRisk >= 62).length >= 2 &&
+    params.playbackFreshnessAgeMs >= 18_000;
+  const pressureIncrease =
+    (params.energy <= 4.6 ? 5 : 0) +
+    ((params.crowdMomentumProjection ?? 50) < 46 ? 6 : 0) +
+    (phraseTransitionWindow === "chorus" && phrasePosition > 68 ? 4 : 0) +
+    (phraseTransitionWindow === "unstable" ? 8 : 0) +
+    (params.executionWindowState === "narrow_window" ? 4 : params.executionWindowState === "stable_window" ? -4 : 7) +
+    (staleFreshnessRecurring ? 4 : 0);
+  const pressureDecay =
+    phraseTransitionWindow === "phrase_boundary" && phraseStability >= 70 && params.runtimeConvergenceScore >= 65 ? 5 : 0;
+  const transitionPressure = Number(clamp(previous.transitionPressure + pressureIncrease - pressureDecay, 0, 100).toFixed(2));
+  const transitionTimingConfidence = Number(
+    clamp(
+      phraseAlignmentConfidence * 0.36 +
+        phraseStability * 0.3 +
+        (100 - transitionPressure) * 0.18 +
+        (phraseTransitionWindow === "phrase_boundary" || phraseTransitionWindow === "outro" ? 82 : 56) * 0.16,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const phraseTimingRisk = Number(
+    clamp(
+      (100 - transitionTimingConfidence) * 0.6 +
+        (phraseTransitionWindow === "unstable" ? 24 : 0) +
+        ((params.vocalOverlapRisk ?? 42) * 0.2) +
+        ((params.heartbeatDrift ?? 25) * 0.2),
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const phraseHistory = boundedPush(previous.phraseHistory, {
+    timestamp: now,
+    phrasePosition,
+    alignmentConfidence: phraseAlignmentConfidence,
+    momentum: phraseMomentum,
+    stability: phraseStability,
+    timingRisk: phraseTimingRisk,
+    transitionWindow: phraseTransitionWindow,
+  });
+  const transitionPressureHistory = boundedPush(previous.transitionPressureHistory, {
+    timestamp: now,
+    pressure: transitionPressure,
+    reason:
+      pressureIncrease > pressureDecay
+        ? "Transition pressure rising from phrase instability or missed timing opportunities."
+        : "Transition pressure eased by stable boundary execution conditions.",
+  });
+  phraseTimingStore.set(params.userId, {
+    phraseHistory,
+    transitionPressureHistory,
+    transitionPressure,
+  });
+  const phraseTimingReasoning: string[] = [];
+  if (transitionTimingConfidence >= 78) phraseTimingReasoning.push("Transition timing improved with favorable phrase window.");
+  if (phraseTransitionWindow === "phrase_boundary") phraseTimingReasoning.push("Phrase boundary favorable for supervised transition timing.");
+  if (phraseTransitionWindow === "unstable") phraseTimingReasoning.push("Phrase timing unstable due to execution window instability.");
+  if (transitionPressure >= 62) phraseTimingReasoning.push("Transition pressure rising from repeated timing friction.");
+  if (phraseTimingRisk >= 62) phraseTimingReasoning.push("Timing risk elevated by drift, vocal overlap, or unstable phrase context.");
+  return {
+    currentPhrasePosition: phrasePosition,
+    currentPhraseLength: phraseLength,
+    phraseAlignmentConfidence,
+    phraseTransitionWindow,
+    phraseMomentum,
+    phraseStability,
+    phraseTimingRisk,
+    transitionPressure,
+    transitionTimingConfidence,
+    phraseHistory,
+    transitionPressureHistory,
+    phraseTimingReasoning,
+  };
+}
+
+function evaluateHarmonicEmotion(params: {
+  userId: string;
+  camelotCompatibility: CamelotCompatibility;
+  bpmContinuityScore: number;
+  phraseTimingConfidence: number;
+  transitionAggressiveness: number;
+  vocalOverlapRisk: number;
+  energyTrajectory: number;
+  crowdMomentum: number;
+  transitionPressure: number;
+  phraseStability: number;
+  runtimeConvergenceScore: number;
+}) {
+  const now = Date.now();
+  const previous = harmonicEmotionStore.get(params.userId) ?? {
+    harmonicHistory: [],
+    emotionalMomentumHistory: [],
+    harmonicTensionHistory: [],
+    unresolvedTransitionCount: 0,
+  };
+  const camelotScore =
+    params.camelotCompatibility === "match"
+      ? 95
+      : params.camelotCompatibility === "adjacent"
+        ? 86
+        : params.camelotCompatibility === "relative"
+          ? 74
+          : params.camelotCompatibility === "unknown"
+            ? 58
+            : 34;
+  const energyDrift = Number(clamp(Math.abs(params.energyTrajectory) * 14.5, 0, 100).toFixed(2));
+  const crowdEmotionalAlignment = Number(
+    clamp(
+      params.crowdMomentum * 0.5 +
+        (100 - params.transitionPressure) * 0.2 +
+        params.phraseStability * 0.18 +
+        params.runtimeConvergenceScore * 0.12,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const emotionalMomentum = Number(
+    clamp(
+      params.crowdMomentum * 0.45 +
+        (100 - energyDrift) * 0.2 +
+        params.phraseTimingConfidence * 0.2 +
+        (100 - params.transitionAggressiveness) * 0.15,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const tonalStability = Number(
+    clamp(
+      camelotScore * 0.4 +
+        params.bpmContinuityScore * 0.22 +
+        params.phraseStability * 0.2 +
+        (100 - params.vocalOverlapRisk) * 0.18,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const previousHarmonicTension = previous.harmonicTensionHistory[previous.harmonicTensionHistory.length - 1]?.tension ?? 42;
+  const tensionIncrease =
+    (camelotScore < 52 ? 7 : 0) +
+    (params.bpmContinuityScore < 60 ? 5 : 0) +
+    (params.phraseTimingConfidence < 58 ? 5 : 0) +
+    (energyDrift > 62 ? 4 : 0) +
+    (params.vocalOverlapRisk > 58 ? 4 : 0) +
+    (params.transitionAggressiveness > 70 ? 4 : 0) +
+    (previous.unresolvedTransitionCount >= 2 ? 2 : 0);
+  const tensionDecrease =
+    tonalStability >= 70 && params.phraseTimingConfidence >= 68 && params.transitionPressure <= 56 ? 9 : 3;
+  const tensionCarryover =
+    previousHarmonicTension *
+    (tonalStability >= 72 && params.phraseTimingConfidence >= 70 && params.transitionPressure <= 54 ? 0.84 : 0.9);
+  const harmonicTension = Number(
+    clamp(
+      tensionCarryover + tensionIncrease - tensionDecrease,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const harmonicCompatibility = Number(
+    clamp(
+      camelotScore * 0.55 + params.bpmContinuityScore * 0.15 + params.phraseTimingConfidence * 0.15 + tonalStability * 0.15,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const emotionalContinuity = Number(
+    clamp(
+      harmonicCompatibility * 0.26 +
+        params.phraseTimingConfidence * 0.2 +
+        crowdEmotionalAlignment * 0.18 +
+        (100 - params.transitionPressure) * 0.12 +
+        params.bpmContinuityScore * 0.12 +
+        (100 - harmonicTension) * 0.12,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const emotionalTransitionRisk = Number(
+    clamp(
+      harmonicTension * 0.35 +
+        (100 - emotionalContinuity) * 0.3 +
+        params.transitionAggressiveness * 0.15 +
+        energyDrift * 0.1 +
+        params.vocalOverlapRisk * 0.1,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const harmonicResolutionConfidence = Number(
+    clamp(
+      (100 - harmonicTension) * 0.4 +
+        harmonicCompatibility * 0.2 +
+        emotionalContinuity * 0.16 +
+        params.phraseStability * 0.14 +
+        params.runtimeConvergenceScore * 0.1,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const unresolvedTransitionCount =
+    emotionalTransitionRisk >= 62
+      ? previous.unresolvedTransitionCount + 1
+      : Math.max(0, previous.unresolvedTransitionCount - 2);
+  const harmonicHistory = boundedPush(previous.harmonicHistory, {
+    timestamp: now,
+    harmonicCompatibility,
+    tonalStability,
+    resolutionConfidence: harmonicResolutionConfidence,
+  });
+  const emotionalMomentumHistory = boundedPush(previous.emotionalMomentumHistory, {
+    timestamp: now,
+    momentum: emotionalMomentum,
+    continuity: emotionalContinuity,
+    crowdAlignment: crowdEmotionalAlignment,
+  });
+  const harmonicTensionHistory = boundedPush(previous.harmonicTensionHistory, {
+    timestamp: now,
+    tension: harmonicTension,
+    emotionalRisk: emotionalTransitionRisk,
+    reason:
+      emotionalTransitionRisk >= 62
+        ? "Harmonic tension elevated by tonal mismatch, instability, or unresolved emotional cadence."
+        : "Harmonic tension easing through stable progression and phrase-aligned timing.",
+  });
+  harmonicEmotionStore.set(params.userId, {
+    harmonicHistory,
+    emotionalMomentumHistory,
+    harmonicTensionHistory,
+    unresolvedTransitionCount,
+  });
+  const harmonicEmotionReasoning: string[] = [];
+  if (harmonicCompatibility >= 78) harmonicEmotionReasoning.push("Harmonic compatibility improved with stable tonal progression.");
+  if (energyDrift >= 58) harmonicEmotionReasoning.push("Emotional energy drift increased due to trajectory overshoot.");
+  if (harmonicTension >= 62) harmonicEmotionReasoning.push("Harmonic tension elevated from unresolved transition pressure.");
+  if (harmonicTension <= previousHarmonicTension - 4) {
+    harmonicEmotionReasoning.push("Harmonic tension relaxed as resolution recovery outweighed carry-over pressure.");
+  }
+  if (emotionalContinuity >= 72) harmonicEmotionReasoning.push("Emotional continuity stabilized under phrase-aligned cadence.");
+  if (emotionalTransitionRisk >= 62) harmonicEmotionReasoning.push("Harmonic-emotional transition currently risky; supervision advised.");
+  return {
+    harmonicCompatibility,
+    emotionalContinuity,
+    tonalStability,
+    emotionalMomentum,
+    harmonicTension,
+    emotionalTransitionRisk,
+    crowdEmotionalAlignment,
+    emotionalEnergyDrift: energyDrift,
+    harmonicResolutionConfidence,
+    harmonicHistory,
+    emotionalMomentumHistory,
+    harmonicTensionHistory,
+    harmonicEmotionReasoning,
+  };
+}
+
+function evaluateCrowdAdaptation(params: {
+  userId: string;
+  emotionalContinuity: number;
+  transitionPressure: number;
+  phraseTimingConfidence: number;
+  harmonicTension: number;
+  recentTransitionCadence: number;
+  runtimeConvergence: number;
+  crowdEmotionalAlignment: number;
+  energyTrajectory: number;
+  bpmMovement: number;
+  recentStabilizationSuccess: number;
+  heartbeatDrift: number;
+}) {
+  const now = Date.now();
+  const previous = crowdAdaptationStore.get(params.userId) ?? {
+    crowdMomentumHistory: [],
+    crowdFatigueHistory: [],
+    crowdRecoveryHistory: [],
+    crowdVolatilityHistory: [],
+    fatiguePressure: 30,
+  };
+  const previousFatiguePressure = previous.fatiguePressure;
+  const previousVolatility = previous.crowdVolatilityHistory[previous.crowdVolatilityHistory.length - 1]?.volatility ?? 42;
+  const healthySpacingConfidence = Number(
+    clamp(
+      (100 - params.recentTransitionCadence) * 0.55 +
+        params.phraseTimingConfidence * 0.25 +
+        params.recentStabilizationSuccess * 0.2,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const momentumScore = Number(
+    clamp(
+      params.crowdEmotionalAlignment * 0.35 +
+        params.emotionalContinuity * 0.25 +
+        (100 - params.transitionPressure) * 0.12 +
+        params.runtimeConvergence * 0.16 +
+        params.recentStabilizationSuccess * 0.12,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const hypeSaturation = Number(
+    clamp(
+      Math.max(0, params.energyTrajectory) * 10.5 +
+        params.recentTransitionCadence * 0.35 +
+        Math.max(0, 65 - params.phraseTimingConfidence) * 0.2,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const fatigueIncrease =
+    (params.recentTransitionCadence > 72 ? 4 : 0) +
+    (params.energyTrajectory > 1.2 ? 3 : 0) +
+    (hypeSaturation > 68 ? 5 : 0) +
+    (params.emotionalContinuity < 58 ? 4 : 0) +
+    (params.harmonicTension > 60 ? 4 : 0) +
+    (params.recentTransitionCadence > 84 ? 3 : 0);
+  const fatigueDecay =
+    params.phraseTimingConfidence >= 70 &&
+    params.emotionalContinuity >= 68 &&
+    params.transitionPressure <= 56 &&
+    params.energyTrajectory <= 0.8
+      ? 8
+      : healthySpacingConfidence >= 64
+        ? 5
+        : 2;
+  const crowdFatiguePressure = Number(clamp(previous.fatiguePressure + fatigueIncrease - fatigueDecay, 0, 100).toFixed(2));
+  const rawVolatility = Number(
+    clamp(
+      params.heartbeatDrift * 0.18 +
+        Math.min(100, params.bpmMovement * 9) * 0.17 +
+        (100 - params.runtimeConvergence) * 0.16 +
+        Math.max(0, 100 - params.emotionalContinuity) * 0.15 +
+        Math.max(0, 100 - params.recentStabilizationSuccess) * 0.15,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const crowdEnergyVolatility = Number(
+    clamp(
+      rawVolatility * 0.74 +
+        previousVolatility * 0.26 -
+        (healthySpacingConfidence >= 65 ? 4 : 0),
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const crowdRecoveryConfidence = Number(
+    clamp(
+      params.recentStabilizationSuccess * 0.3 +
+        params.emotionalContinuity * 0.22 +
+        (100 - hypeSaturation) * 0.16 +
+        params.phraseTimingConfidence * 0.12 +
+        (100 - params.transitionPressure) * 0.12 +
+        healthySpacingConfidence * 0.08,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const crowdEngagementConfidence = Number(
+    clamp(
+      momentumScore * 0.42 +
+        params.crowdEmotionalAlignment * 0.24 +
+        (100 - crowdFatiguePressure) * 0.16 +
+        (100 - crowdEnergyVolatility) * 0.18,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const crowdRecoveryState: TransitionEvaluationResult["crowdRecoveryState"] =
+    crowdRecoveryConfidence >= 70 ? "stable" : crowdRecoveryConfidence >= 52 ? "recovering" : "degraded";
+  const crowdEnergyState: TransitionEvaluationResult["crowdEnergyState"] =
+    crowdEnergyVolatility >= 76 && crowdRecoveryConfidence < 62
+      ? "unstable"
+      : crowdFatiguePressure >= 72
+        ? "fatigued"
+        : crowdRecoveryState === "recovering" && crowdEnergyVolatility <= 72
+          ? "recovering"
+          : hypeSaturation >= 72
+            ? "saturated"
+            : momentumScore >= 68
+              ? "rising"
+              : "stable";
+  const crowdAdaptationConfidence = Number(
+    clamp(
+      momentumScore * 0.22 +
+        (100 - crowdFatiguePressure) * 0.22 +
+        crowdRecoveryConfidence * 0.2 +
+        (100 - crowdEnergyVolatility) * 0.16 +
+        params.emotionalContinuity * 0.1 +
+        params.runtimeConvergence * 0.1,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const crowdMomentumHistory = boundedPush(previous.crowdMomentumHistory, {
+    timestamp: now,
+    momentum: momentumScore,
+    engagement: crowdEngagementConfidence,
+    adaptationConfidence: crowdAdaptationConfidence,
+  }, 40);
+  const crowdFatigueHistory = boundedPush(previous.crowdFatigueHistory, {
+    timestamp: now,
+    pressure: crowdFatiguePressure,
+    state: crowdEnergyState,
+  }, 40);
+  const crowdRecoveryHistory = boundedPush(previous.crowdRecoveryHistory, {
+    timestamp: now,
+    recoveryConfidence: crowdRecoveryConfidence,
+    recoveryState: crowdRecoveryState,
+  }, 40);
+  const crowdVolatilityHistory = boundedPush(previous.crowdVolatilityHistory, {
+    timestamp: now,
+    volatility: crowdEnergyVolatility,
+    hypeSaturation,
+  }, 40);
+  crowdAdaptationStore.set(params.userId, {
+    crowdMomentumHistory,
+    crowdFatigueHistory,
+    crowdRecoveryHistory,
+    crowdVolatilityHistory,
+    fatiguePressure: crowdFatiguePressure,
+  });
+  const crowdAdaptationReasoning: string[] = [];
+  if (crowdFatiguePressure >= 64) crowdAdaptationReasoning.push("Crowd fatigue pressure increased from dense or aggressive transition cadence.");
+  if (crowdFatiguePressure <= previousFatiguePressure - 3) {
+    crowdAdaptationReasoning.push("Fatigue pressure reduced as spacing and stabilization support improved.");
+  }
+  if (crowdRecoveryConfidence >= 70) crowdAdaptationReasoning.push("Crowd recovery stabilized under healthy emotional continuity.");
+  if (healthySpacingConfidence >= 66 && crowdRecoveryConfidence >= 64) {
+    crowdAdaptationReasoning.push("Healthy spacing improved recovery confidence and relaxed adaptation pressure.");
+  }
+  if (hypeSaturation >= 70) crowdAdaptationReasoning.push("Crowd hype saturation elevated; avoid excessive escalation.");
+  if (crowdEnergyState === "unstable") crowdAdaptationReasoning.push("Crowd state unstable due to volatility and unresolved timing pressure.");
+  if (crowdEnergyVolatility <= previousVolatility - 4) {
+    crowdAdaptationReasoning.push("Volatility relaxed after cadence spacing and recovery gains held steady.");
+  }
+  if (crowdAdaptationConfidence >= 72) crowdAdaptationReasoning.push("Crowd adaptation confidence improved under stable momentum/recovery balance.");
+  return {
+    crowdEnergyState,
+    crowdMomentumScore: momentumScore,
+    crowdFatiguePressure,
+    crowdRecoveryState,
+    crowdEngagementConfidence,
+    crowdEnergyVolatility,
+    crowdHypeSaturation: hypeSaturation,
+    crowdRecoveryConfidence,
+    crowdAdaptationConfidence,
+    crowdMomentumHistory,
+    crowdFatigueHistory,
+    crowdRecoveryHistory,
+    crowdVolatilityHistory,
+    crowdAdaptationReasoning,
+  };
+}
+
+function evaluateNarrativeFlow(params: {
+  userId: string;
+  crowdAdaptation: {
+    crowdMomentumScore: number;
+    crowdFatiguePressure: number;
+    crowdRecoveryConfidence: number;
+    crowdEnergyVolatility: number;
+    crowdHypeSaturation: number;
+    crowdAdaptationConfidence: number;
+  };
+  emotionalContinuity: number;
+  harmonicTension: number;
+  phraseTimingConfidence: number;
+  runtimeConvergence: number;
+  recentTransitionCadence: number;
+  bpmMovementTrajectory: number;
+  recentRecoveryCycles: number;
+  transitionPressure: number;
+  emotionalDrift: number;
+  recentStabilizationSuccess: number;
+}) {
+  const now = Date.now();
+  const previous = narrativeFlowStore.get(params.userId) ?? {
+    narrativeMomentumHistory: [],
+    narrativeTensionHistory: [],
+    narrativeRecoveryHistory: [],
+    narrativeEnergyArcHistory: [],
+    narrativeFlowState: "build" as const,
+    lastStateChangedAt: now,
+  };
+  const narrativeMomentum = Number(
+    clamp(
+      params.crowdAdaptation.crowdMomentumScore * 0.32 +
+        params.emotionalContinuity * 0.2 +
+        params.crowdAdaptation.crowdAdaptationConfidence * 0.16 +
+        params.runtimeConvergence * 0.16 +
+        params.recentStabilizationSuccess * 0.16,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const cadenceStabilitySignal = Number(
+    clamp(
+      (100 - params.recentTransitionCadence) * 0.55 +
+        params.phraseTimingConfidence * 0.25 +
+        params.recentStabilizationSuccess * 0.2,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const tensionIncrease =
+    (params.transitionPressure > 66 ? 7 : 0) +
+    (params.harmonicTension > 62 ? 6 : 0) +
+    (params.crowdAdaptation.crowdHypeSaturation > 72 ? 5 : 0) +
+    (params.recentTransitionCadence > 76 ? 4 : 0) +
+    (params.emotionalContinuity < 58 ? 4 : 0) +
+    (params.recentRecoveryCycles >= 3 ? 2 : 0);
+  const tensionDecay =
+    params.phraseTimingConfidence >= 70 &&
+    params.emotionalContinuity >= 70 &&
+    params.runtimeConvergence >= 68 &&
+    params.transitionPressure <= 56
+      ? 10
+      : cadenceStabilitySignal >= 64
+        ? 6
+        : 3;
+  const previousNarrativeTension = previous.narrativeTensionHistory[previous.narrativeTensionHistory.length - 1]?.tension ?? 44;
+  const narrativeTension = Number(clamp(previousNarrativeTension + tensionIncrease - tensionDecay, 0, 100).toFixed(2));
+  const sustainedPeakPenalty = previous.narrativeTensionHistory.slice(-5).filter((item) => item.tension >= 72).length >= 3 ? 8 : 0;
+  const narrativeEnergyArc = Number(
+    clamp(
+      (100 - Math.abs(params.bpmMovementTrajectory - 6) * 8) * 0.2 +
+        (100 - params.crowdAdaptation.crowdHypeSaturation) * 0.18 +
+        params.emotionalContinuity * 0.22 +
+        params.phraseTimingConfidence * 0.2 +
+        (100 - params.transitionPressure) * 0.2 -
+        sustainedPeakPenalty,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const narrativeContinuity = Number(
+    clamp(
+      params.emotionalContinuity * 0.28 +
+        params.crowdAdaptation.crowdAdaptationConfidence * 0.18 +
+        (100 - params.harmonicTension) * 0.14 +
+        params.phraseTimingConfidence * 0.16 +
+        (100 - params.crowdAdaptation.crowdEnergyVolatility) * 0.1 +
+        params.runtimeConvergence * 0.08 +
+        cadenceStabilitySignal * 0.06,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const narrativeFatigueRisk = Number(
+    clamp(
+      params.crowdAdaptation.crowdFatiguePressure * 0.36 +
+        params.crowdAdaptation.crowdHypeSaturation * 0.2 +
+        narrativeTension * 0.2 +
+        params.recentTransitionCadence * 0.14 +
+        Math.max(0, 100 - params.recentStabilizationSuccess) * 0.1,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const narrativeJourneyAlignment = Number(
+    clamp(
+      narrativeMomentum * 0.2 +
+        narrativeEnergyArc * 0.2 +
+        narrativeContinuity * 0.2 +
+        (100 - narrativeFatigueRisk) * 0.16 +
+        params.runtimeConvergence * 0.14 +
+        params.crowdAdaptation.crowdRecoveryConfidence * 0.1,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const narrativeRecoveryPressure = Number(
+    clamp(
+      narrativeTension * 0.34 +
+        narrativeFatigueRisk * 0.28 +
+        params.crowdAdaptation.crowdEnergyVolatility * 0.16 +
+        (100 - params.phraseTimingConfidence) * 0.12 +
+        (100 - params.recentStabilizationSuccess) * 0.1,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const narrativeResolutionConfidence = Number(
+    clamp(
+      (100 - narrativeTension) * 0.26 +
+        (100 - narrativeRecoveryPressure) * 0.2 +
+        params.crowdAdaptation.crowdRecoveryConfidence * 0.22 +
+        narrativeContinuity * 0.18 +
+        params.runtimeConvergence * 0.14,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const narrativeProgressionConfidence = Number(
+    clamp(
+      narrativeJourneyAlignment * 0.3 +
+        narrativeEnergyArc * 0.2 +
+        narrativeContinuity * 0.18 +
+        narrativeResolutionConfidence * 0.16 +
+        (100 - narrativeFatigueRisk) * 0.16,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const unstableRecentCount = previous.narrativeTensionHistory.slice(-4).filter((item) => item.state === "unstable").length;
+  const candidateState: TransitionEvaluationResult["narrativeFlowState"] =
+    params.crowdAdaptation.crowdEnergyVolatility >= 76 || narrativeContinuity < 42
+      ? "unstable"
+      : narrativeRecoveryPressure >= 72 || narrativeFatigueRisk >= 74
+        ? "recovery"
+        : params.crowdAdaptation.crowdHypeSaturation >= 78 && narrativeTension >= 72
+          ? "peak"
+          : narrativeMomentum >= 72 && narrativeTension >= 60
+            ? "rise"
+            : narrativeMomentum >= 58 && narrativeContinuity >= 64 && narrativeTension < 68
+              ? "sustain"
+              : narrativeTension <= 46 && narrativeResolutionConfidence >= 68
+                ? "release"
+                : "build";
+  const minStateHoldMs = 14_000;
+  const recentlyChanged = now - previous.lastStateChangedAt < minStateHoldMs;
+  const flipBlocked =
+    recentlyChanged &&
+    ((previous.narrativeFlowState === "peak" && (candidateState === "recovery" || candidateState === "unstable")) ||
+      (previous.narrativeFlowState === "recovery" && (candidateState === "peak" || candidateState === "unstable")) ||
+      (previous.narrativeFlowState === "unstable" && (candidateState === "peak" || candidateState === "recovery")));
+  const unstableLoopRecovered =
+    unstableRecentCount >= 3 &&
+    narrativeRecoveryPressure <= 66 &&
+    narrativeContinuity >= 56 &&
+    params.crowdAdaptation.crowdEnergyVolatility <= 64;
+  const narrativeFlowState = unstableLoopRecovered
+    ? "recovery"
+    : flipBlocked
+      ? previous.narrativeFlowState
+      : candidateState;
+  const stateChanged = narrativeFlowState !== previous.narrativeFlowState;
+  const lastStateChangedAt = stateChanged ? now : previous.lastStateChangedAt;
+  const narrativeMomentumHistory = boundedPush(
+    previous.narrativeMomentumHistory,
+    { timestamp: now, momentum: narrativeMomentum, continuity: narrativeContinuity, progression: narrativeProgressionConfidence },
+    48,
+  );
+  const narrativeTensionHistory = boundedPush(
+    previous.narrativeTensionHistory,
+    { timestamp: now, tension: narrativeTension, state: narrativeFlowState },
+    48,
+  );
+  const narrativeRecoveryHistory = boundedPush(
+    previous.narrativeRecoveryHistory,
+    { timestamp: now, recoveryPressure: narrativeRecoveryPressure, resolutionConfidence: narrativeResolutionConfidence, state: narrativeFlowState },
+    48,
+  );
+  const narrativeEnergyArcHistory = boundedPush(
+    previous.narrativeEnergyArcHistory,
+    { timestamp: now, energyArc: narrativeEnergyArc, fatigueRisk: narrativeFatigueRisk, journeyAlignment: narrativeJourneyAlignment },
+    48,
+  );
+  narrativeFlowStore.set(params.userId, {
+    narrativeMomentumHistory,
+    narrativeTensionHistory,
+    narrativeRecoveryHistory,
+    narrativeEnergyArcHistory,
+    narrativeFlowState,
+    lastStateChangedAt,
+  });
+  const narrativeReasoning: string[] = [];
+  if (narrativeMomentum >= 72) narrativeReasoning.push("Narrative momentum improved with healthy crowd adaptation and convergence.");
+  if (narrativeFatigueRisk >= 66) narrativeReasoning.push("Narrative fatigue pressure increasing from sustained hype and dense cadence.");
+  if (params.emotionalDrift >= 56 || params.crowdAdaptation.crowdEnergyVolatility >= 62) {
+    narrativeReasoning.push("Narrative emotional pacing unstable due to drift and volatility pressure.");
+  }
+  if (narrativeContinuity >= 70) narrativeReasoning.push("Narrative continuity healthy under stable timing and harmonic recovery.");
+  if (narrativeContinuity >= 66 && cadenceStabilitySignal >= 64) {
+    narrativeReasoning.push("Narrative continuity recovered as cadence stability improved and tension growth slowed.");
+  }
+  if (narrativeFlowState === "recovery") narrativeReasoning.push("Narrative recovery phase necessary to avoid unresolved tension stacking.");
+  if (unstableLoopRecovered) {
+    narrativeReasoning.push("Stability recovered by biasing recovery/release over repeated unstable escalation.");
+  }
+  if (params.crowdAdaptation.crowdHypeSaturation >= 78 && narrativeTension >= 70) {
+    narrativeReasoning.push("Peak saturation becoming risky; supervised release pacing recommended.");
+  }
+  return {
+    narrativeFlowState,
+    narrativeMomentum,
+    narrativeTension,
+    narrativeRecoveryPressure,
+    narrativeProgressionConfidence,
+    narrativeContinuity,
+    narrativeEnergyArc,
+    narrativeResolutionConfidence,
+    narrativeFatigueRisk,
+    narrativeJourneyAlignment,
+    narrativeMomentumHistory,
+    narrativeTensionHistory,
+    narrativeRecoveryHistory,
+    narrativeEnergyArcHistory,
+    narrativeReasoning,
+  };
+}
+
+function evaluateAdaptiveCadence(params: {
+  userId: string;
+  narrativeMomentum: number;
+  crowdFatiguePressure: number;
+  transitionPressure: number;
+  emotionalContinuity: number;
+  phraseTimingConfidence: number;
+  runtimeConvergence: number;
+  transitionCadenceFrequency: number;
+  recentRecoveryCycles: number;
+  hypeSaturation: number;
+  volatility: number;
+  energyArcQuality: number;
+  stabilizationSuccess: number;
+  narrativeRecoveryPressure: number;
+  narrativeContinuity: number;
+}) {
+  const now = Date.now();
+  const previous = adaptiveCadenceStore.get(params.userId) ?? {
+    cadenceDensityHistory: [],
+    cadenceAggressionHistory: [],
+    cadenceRecoveryHistory: [],
+    cadenceStabilityHistory: [],
+    cadenceState: "balanced" as const,
+    cadenceEscalationPressure: 36,
+    lastStateChangedAt: now,
+  };
+  const cadenceDensity = Number(
+    clamp(
+      params.transitionCadenceFrequency * 0.52 +
+        params.transitionPressure * 0.2 +
+        params.hypeSaturation * 0.14 +
+        (100 - params.phraseTimingConfidence) * 0.14,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const cadenceAggression = Number(
+    clamp(
+      params.narrativeMomentum * 0.32 +
+        params.transitionPressure * 0.2 +
+        params.hypeSaturation * 0.18 +
+        params.volatility * 0.12 +
+        Math.max(0, 100 - params.emotionalContinuity) * 0.08 -
+        (params.runtimeConvergence >= 70 ? 5 : 0),
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const escalationIncrease =
+    (params.narrativeMomentum >= 72 ? 5 : 0) +
+    (params.hypeSaturation >= 72 ? 6 : 0) +
+    (cadenceAggression >= 66 ? 5 : 0) +
+    (cadenceDensity >= 68 ? 4 : 0) +
+    (params.transitionPressure >= 64 ? 4 : 0);
+  const escalationDecay =
+    params.narrativeRecoveryPressure <= 54 &&
+    params.crowdFatiguePressure <= 58 &&
+    params.stabilizationSuccess >= 68
+      ? 10
+      : params.runtimeConvergence >= 68 && params.volatility <= 62
+        ? 6
+        : 3;
+  const cadenceEscalationPressure = Number(
+    clamp(previous.cadenceEscalationPressure + escalationIncrease - escalationDecay, 0, 100).toFixed(2),
+  );
+  const cadenceRecoverySpacing = Number(
+    clamp(
+      (100 - cadenceDensity) * 0.34 +
+        (100 - cadenceAggression) * 0.2 +
+        params.narrativeRecoveryPressure * 0.18 +
+        params.stabilizationSuccess * 0.16 +
+        params.phraseTimingConfidence * 0.12,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const cadenceBreathingRoom = Number(
+    clamp(
+      (100 - cadenceDensity) * 0.24 +
+        (100 - cadenceEscalationPressure) * 0.2 +
+        (100 - params.hypeSaturation) * 0.18 +
+        params.emotionalContinuity * 0.12 +
+        cadenceRecoverySpacing * 0.2 +
+        params.runtimeConvergence * 0.06,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const cadenceFatigueLoad = Number(
+    clamp(
+      params.crowdFatiguePressure * 0.34 +
+        cadenceDensity * 0.18 +
+        cadenceEscalationPressure * 0.2 +
+        params.hypeSaturation * 0.18 +
+        Math.max(0, 100 - cadenceBreathingRoom) * 0.1,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const cadenceNarrativeBalance = Number(
+    clamp(
+      params.narrativeContinuity * 0.24 +
+        params.energyArcQuality * 0.24 +
+        cadenceBreathingRoom * 0.18 +
+        cadenceRecoverySpacing * 0.14 +
+        (100 - cadenceFatigueLoad) * 0.2,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const cadenceStability = Number(
+    clamp(
+      (100 - params.volatility) * 0.22 +
+        (100 - cadenceAggression) * 0.12 +
+        (100 - cadenceDensity) * 0.12 +
+        cadenceBreathingRoom * 0.2 +
+        cadenceRecoverySpacing * 0.14 +
+        params.runtimeConvergence * 0.2,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const cadenceAdaptationConfidence = Number(
+    clamp(
+      cadenceNarrativeBalance * 0.25 +
+        cadenceStability * 0.25 +
+        cadenceBreathingRoom * 0.2 +
+        cadenceRecoverySpacing * 0.14 +
+        (100 - cadenceEscalationPressure) * 0.08 +
+        params.runtimeConvergence * 0.08,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const candidateState: TransitionEvaluationResult["cadenceState"] =
+    params.volatility >= 70
+      ? "unstable"
+      : cadenceEscalationPressure >= 78 && cadenceBreathingRoom <= 34
+        ? "saturated"
+        : cadenceAggression >= 72 || cadenceDensity >= 74
+          ? "aggressive"
+          : cadenceEscalationPressure >= 64
+            ? "escalating"
+            : cadenceRecoverySpacing >= 68 && cadenceBreathingRoom >= 62
+              ? "recovering"
+              : cadenceDensity <= 38
+                ? "restrained"
+                : "balanced";
+  const minHoldMs = 15_000;
+  const recentlyChanged = now - previous.lastStateChangedAt < minHoldMs;
+  const flipBlocked =
+    recentlyChanged &&
+    ((previous.cadenceState === "aggressive" && (candidateState === "recovering" || candidateState === "unstable")) ||
+      (previous.cadenceState === "recovering" && (candidateState === "aggressive" || candidateState === "saturated")) ||
+      (previous.cadenceState === "unstable" && (candidateState === "aggressive" || candidateState === "recovering")));
+  const cadenceState = flipBlocked ? previous.cadenceState : candidateState;
+  const previousBreathingRoom = previous.cadenceRecoveryHistory[previous.cadenceRecoveryHistory.length - 1]?.breathingRoom ?? cadenceBreathingRoom;
+  const lastStateChangedAt = cadenceState === previous.cadenceState ? previous.lastStateChangedAt : now;
+  const cadenceDensityHistory = boundedPush(
+    previous.cadenceDensityHistory,
+    { timestamp: now, density: cadenceDensity, state: cadenceState },
+    64,
+  );
+  const cadenceAggressionHistory = boundedPush(
+    previous.cadenceAggressionHistory,
+    { timestamp: now, aggression: cadenceAggression, escalationPressure: cadenceEscalationPressure },
+    64,
+  );
+  const cadenceRecoveryHistory = boundedPush(
+    previous.cadenceRecoveryHistory,
+    { timestamp: now, recoverySpacing: cadenceRecoverySpacing, breathingRoom: cadenceBreathingRoom },
+    64,
+  );
+  const cadenceStabilityHistory = boundedPush(
+    previous.cadenceStabilityHistory,
+    { timestamp: now, stability: cadenceStability, adaptationConfidence: cadenceAdaptationConfidence, fatigueLoad: cadenceFatigueLoad },
+    64,
+  );
+  adaptiveCadenceStore.set(params.userId, {
+    cadenceDensityHistory,
+    cadenceAggressionHistory,
+    cadenceRecoveryHistory,
+    cadenceStabilityHistory,
+    cadenceState,
+    cadenceEscalationPressure,
+    lastStateChangedAt,
+  });
+  const cadenceReasoning: string[] = [];
+  if (cadenceState === "aggressive" || cadenceState === "saturated") {
+    cadenceReasoning.push("Cadence becoming aggressive due to sustained density and escalation pressure.");
+  }
+  if (cadenceBreathingRoom <= 38) {
+    cadenceReasoning.push("Cadence breathing room collapsing from dense pacing and unresolved escalation.");
+  }
+  if (cadenceRecoverySpacing >= 68) {
+    cadenceReasoning.push("Cadence recovery spacing healthy with stable release windows.");
+  }
+  if (cadenceEscalationPressure >= 70) {
+    cadenceReasoning.push("Cadence escalation pressure elevated by momentum/hype persistence.");
+  }
+  if (cadenceBreathingRoom >= previousBreathingRoom + 4) {
+    cadenceReasoning.push("Cadence breathing room preserved longer under stable transport and recovery spacing.");
+  }
+  if (cadenceStability >= 70 && cadenceAdaptationConfidence >= 70) {
+    cadenceReasoning.push("Cadence stabilized under balanced pacing and convergence support.");
+  }
+  return {
+    cadenceState,
+    cadenceDensity,
+    cadenceAggression,
+    cadenceRecoverySpacing,
+    cadenceEscalationPressure,
+    cadenceBreathingRoom,
+    cadenceStability,
+    cadenceAdaptationConfidence,
+    cadenceFatigueLoad,
+    cadenceNarrativeBalance,
+    cadenceDensityHistory,
+    cadenceAggressionHistory,
+    cadenceRecoveryHistory,
+    cadenceStabilityHistory,
+    cadenceReasoning,
+  };
+}
+
+function evaluateOrchestrationSynthesis(params: {
+  userId: string;
+  cadence: {
+    cadenceDensity: number;
+    cadenceAggression: number;
+    cadenceRecoverySpacing: number;
+    cadenceEscalationPressure: number;
+    cadenceBreathingRoom: number;
+    cadenceStability: number;
+    cadenceFatigueLoad: number;
+    cadenceNarrativeBalance: number;
+    cadenceAdaptationConfidence: number;
+  };
+  crowd: {
+    crowdFatiguePressure: number;
+    crowdEnergyVolatility: number;
+    crowdAdaptationConfidence: number;
+    crowdRecoveryConfidence: number;
+    crowdHypeSaturation: number;
+  };
+  narrative: {
+    narrativeMomentum: number;
+    narrativeRecoveryPressure: number;
+    narrativeContinuity: number;
+    narrativeEnergyArc: number;
+    narrativeFatigueRisk: number;
+  };
+  harmonic: {
+    emotionalContinuity: number;
+    harmonicTension: number;
+    emotionalEnergyDrift: number;
+  };
+  phrase: {
+    transitionPressure: number;
+    timingConfidence: number;
+    timingRisk: number;
+  };
+  runtime: {
+    convergence: number;
+    transportStability: number;
+    deviceSynchronizationConfidence: number;
+    heartbeatContinuity: number;
+    heartbeatDrift: number;
+  };
+  mutation: {
+    rollbackReadiness: number;
+    rollbackSafetyMargin: number;
+    executionWindowState: ExecutionWindowState;
+  };
+}) {
+  const now = Date.now();
+  const previous = orchestrationSynthesisStore.get(params.userId) ?? {
+    orchestrationBalanceHistory: [],
+    orchestrationConflictHistory: [],
+    orchestrationAlignmentHistory: [],
+    orchestrationStabilityHistory: [],
+    orchestrationRecoveryPriority: 52,
+    orchestrationEscalationPriority: 48,
+    orchestrationContinuityPriority: 56,
+    orchestrationFatiguePriority: 50,
+    orchestrationNarrativePriority: 54,
+  };
+  const orchestrationConflictPressure = Number(
+    clamp(
+      (params.cadence.cadenceAggression >= 70 && params.crowd.crowdFatiguePressure >= 62 ? 18 : 0) +
+        (params.narrative.narrativeMomentum >= 70 && params.narrative.narrativeRecoveryPressure >= 62 ? 16 : 0) +
+        (params.phrase.timingConfidence < 56 && params.cadence.cadenceEscalationPressure >= 66 ? 14 : 0) +
+        (params.harmonic.harmonicTension >= 64 && params.phrase.transitionPressure >= 64 ? 14 : 0) +
+        (params.runtime.convergence < 58 && params.cadence.cadenceAggression >= 66 ? 12 : 0) +
+        (params.runtime.transportStability < 56 && params.cadence.cadenceDensity >= 68 ? 12 : 0) +
+        (params.cadence.cadenceEscalationPressure * 0.14) +
+        (params.crowd.crowdEnergyVolatility * 0.16) +
+        ((100 - params.runtime.convergence) * 0.14) +
+        ((100 - params.harmonic.emotionalContinuity) * 0.12),
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const orchestrationAlignment = Number(
+    clamp(
+      params.phrase.timingConfidence * 0.15 +
+        params.harmonic.emotionalContinuity * 0.18 +
+        params.narrative.narrativeContinuity * 0.17 +
+        params.cadence.cadenceNarrativeBalance * 0.16 +
+        params.crowd.crowdAdaptationConfidence * 0.12 +
+        params.runtime.convergence * 0.12 +
+        params.runtime.transportStability * 0.1,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const orchestrationBalanceScore = Number(
+    clamp(
+      (100 - Math.abs(params.cadence.cadenceAggression - params.cadence.cadenceRecoverySpacing)) * 0.18 +
+        (100 - Math.abs(params.narrative.narrativeMomentum - params.narrative.narrativeRecoveryPressure)) * 0.16 +
+        params.cadence.cadenceBreathingRoom * 0.14 +
+        params.narrative.narrativeEnergyArc * 0.14 +
+        params.crowd.crowdRecoveryConfidence * 0.1 +
+        (100 - params.crowd.crowdFatiguePressure) * 0.12 +
+        params.runtime.convergence * 0.16,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const orchestrationStability = Number(
+    clamp(
+      params.cadence.cadenceStability * 0.22 +
+        (100 - orchestrationConflictPressure) * 0.18 +
+        params.runtime.heartbeatContinuity * 0.16 +
+        (100 - params.runtime.heartbeatDrift) * 0.1 +
+        params.runtime.transportStability * 0.14 +
+        params.runtime.deviceSynchronizationConfidence * 0.1 +
+        params.runtime.convergence * 0.1,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const targetRecoveryPriority = clamp(
+    params.cadence.cadenceRecoverySpacing * 0.24 +
+      params.narrative.narrativeRecoveryPressure * 0.22 +
+      params.crowd.crowdFatiguePressure * 0.14 +
+      orchestrationConflictPressure * 0.2 +
+      (100 - params.runtime.convergence) * 0.2,
+    0,
+    100,
+  );
+  const targetEscalationPriority = clamp(
+    params.narrative.narrativeMomentum * 0.26 +
+      params.cadence.cadenceEscalationPressure * 0.26 +
+      params.crowd.crowdHypeSaturation * 0.16 +
+      (100 - params.cadence.cadenceBreathingRoom) * 0.14 +
+      (100 - params.crowd.crowdFatiguePressure) * 0.18,
+    0,
+    100,
+  );
+  const targetContinuityPriority = clamp(
+    params.harmonic.emotionalContinuity * 0.3 +
+      params.phrase.timingConfidence * 0.2 +
+      params.narrative.narrativeContinuity * 0.2 +
+      params.runtime.convergence * 0.15 +
+      params.runtime.transportStability * 0.15,
+    0,
+    100,
+  );
+  const targetFatiguePriority = clamp(
+    params.cadence.cadenceFatigueLoad * 0.28 +
+      params.crowd.crowdFatiguePressure * 0.26 +
+      params.narrative.narrativeFatigueRisk * 0.2 +
+      params.crowd.crowdEnergyVolatility * 0.14 +
+      params.harmonic.emotionalEnergyDrift * 0.12,
+    0,
+    100,
+  );
+  const targetNarrativePriority = clamp(
+    params.narrative.narrativeMomentum * 0.2 +
+      params.narrative.narrativeContinuity * 0.22 +
+      params.narrative.narrativeEnergyArc * 0.2 +
+      params.cadence.cadenceNarrativeBalance * 0.18 +
+      params.phrase.timingConfidence * 0.2,
+    0,
+    100,
+  );
+  const smooth = 0.22;
+  const orchestrationRecoveryPriority = Number(
+    clamp(previous.orchestrationRecoveryPriority + (targetRecoveryPriority - previous.orchestrationRecoveryPriority) * smooth, 0, 100).toFixed(2),
+  );
+  const orchestrationEscalationPriority = Number(
+    clamp(previous.orchestrationEscalationPriority + (targetEscalationPriority - previous.orchestrationEscalationPriority) * smooth, 0, 100).toFixed(2),
+  );
+  const orchestrationContinuityPriority = Number(
+    clamp(previous.orchestrationContinuityPriority + (targetContinuityPriority - previous.orchestrationContinuityPriority) * smooth, 0, 100).toFixed(2),
+  );
+  const orchestrationFatiguePriority = Number(
+    clamp(previous.orchestrationFatiguePriority + (targetFatiguePriority - previous.orchestrationFatiguePriority) * smooth, 0, 100).toFixed(2),
+  );
+  const orchestrationNarrativePriority = Number(
+    clamp(previous.orchestrationNarrativePriority + (targetNarrativePriority - previous.orchestrationNarrativePriority) * smooth, 0, 100).toFixed(2),
+  );
+  const orchestrationSynthesisConfidence = Number(
+    clamp(
+      orchestrationAlignment * 0.24 +
+        orchestrationBalanceScore * 0.22 +
+        orchestrationStability * 0.2 +
+        params.cadence.cadenceAdaptationConfidence * 0.12 +
+        params.crowd.crowdAdaptationConfidence * 0.1 +
+        params.runtime.convergence * 0.12 -
+        orchestrationConflictPressure * 0.14,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const orchestrationBalanceHistory = boundedPush(
+    previous.orchestrationBalanceHistory,
+    { timestamp: now, balance: orchestrationBalanceScore, confidence: orchestrationSynthesisConfidence },
+    72,
+  );
+  const orchestrationConflictHistory = boundedPush(
+    previous.orchestrationConflictHistory,
+    {
+      timestamp: now,
+      conflictPressure: orchestrationConflictPressure,
+      recoveryPriority: orchestrationRecoveryPriority,
+      escalationPriority: orchestrationEscalationPriority,
+    },
+    72,
+  );
+  const orchestrationAlignmentHistory = boundedPush(
+    previous.orchestrationAlignmentHistory,
+    {
+      timestamp: now,
+      alignment: orchestrationAlignment,
+      continuityPriority: orchestrationContinuityPriority,
+      narrativePriority: orchestrationNarrativePriority,
+    },
+    72,
+  );
+  const orchestrationStabilityHistory = boundedPush(
+    previous.orchestrationStabilityHistory,
+    {
+      timestamp: now,
+      stability: orchestrationStability,
+      fatiguePriority: orchestrationFatiguePriority,
+      synthesisConfidence: orchestrationSynthesisConfidence,
+    },
+    72,
+  );
+  orchestrationSynthesisStore.set(params.userId, {
+    orchestrationBalanceHistory,
+    orchestrationConflictHistory,
+    orchestrationAlignmentHistory,
+    orchestrationStabilityHistory,
+    orchestrationRecoveryPriority,
+    orchestrationEscalationPriority,
+    orchestrationContinuityPriority,
+    orchestrationFatiguePriority,
+    orchestrationNarrativePriority,
+  });
+  const orchestrationSynthesisReasoning: string[] = [];
+  if (orchestrationBalanceScore >= 72) orchestrationSynthesisReasoning.push("Orchestration balanced as pacing, timing, and recovery are currently aligned.");
+  if (orchestrationConflictPressure >= 64) orchestrationSynthesisReasoning.push("Orchestration conflict pressure elevated from competing escalation, fatigue, and timing demands.");
+  if (orchestrationRecoveryPriority >= 62) orchestrationSynthesisReasoning.push("Recovery priority increased to relieve accumulated multi-layer pressure.");
+  if (orchestrationEscalationPriority <= 44) orchestrationSynthesisReasoning.push("Escalation priority reduced to preserve continuity and avoid saturation.");
+  if (orchestrationSynthesisConfidence <= 52) orchestrationSynthesisReasoning.push("Synthesis confidence unstable under unresolved cross-layer conflicts.");
+  if (orchestrationAlignment >= 70) orchestrationSynthesisReasoning.push("Orchestration alignment improved as cadence, narrative, timing, and emotion converge.");
+  return {
+    orchestrationBalanceScore,
+    orchestrationConflictPressure,
+    orchestrationStability,
+    orchestrationAlignment,
+    orchestrationRecoveryPriority,
+    orchestrationEscalationPriority,
+    orchestrationContinuityPriority,
+    orchestrationFatiguePriority,
+    orchestrationNarrativePriority,
+    orchestrationSynthesisConfidence,
+    orchestrationBalanceHistory,
+    orchestrationConflictHistory,
+    orchestrationAlignmentHistory,
+    orchestrationStabilityHistory,
+    orchestrationSynthesisReasoning,
+  };
+}
+
 function deriveTransitionExecutionStyle(params: {
   phraseCompatibility: "intro_outro_aligned" | "instrumental_to_vocal_drop" | "neutral" | "vocal_overlap_risk" | "drop_collision";
   beatRisk: "safe" | "watch" | "risky";
@@ -525,6 +2101,314 @@ function deriveTransitionExecutionStyle(params: {
     return "smooth_blend" as const;
   }
   return "percussive_swap" as const;
+}
+
+export function determineExecutionStrategy(params: {
+  harmonicCompatibility: string;
+  phraseCompatibility: string;
+  syncCompatibility: string;
+  vocalOverlapRisk: number;
+  beatRisk: string;
+  harmonicRisk: string;
+  phraseRisk: string;
+  currentEnergy: number;
+  targetEnergy: number;
+  crowdMomentum?: string;
+  confidence: number;
+}) {
+  const energyDelta = params.targetEnergy - params.currentEnergy;
+  const strongHarmonic =
+    params.harmonicCompatibility === "match" || params.harmonicCompatibility === "adjacent";
+  const safePhrase =
+    params.phraseCompatibility === "intro_outro_aligned" ||
+    params.phraseCompatibility === "instrumental_to_vocal_drop";
+  const stableSync =
+    params.syncCompatibility === "aligned_downbeat" || params.syncCompatibility === "matched_bar_window";
+  const unsafeSignals =
+    params.confidence < 56 ||
+    params.syncCompatibility === "unstable_window" ||
+    params.syncCompatibility === "drop_collision" ||
+    params.harmonicRisk === "incompatible_harmonic_jump" ||
+    params.phraseCompatibility === "drop_collision";
+  const conflictingSignals =
+    params.beatRisk === "risky" ||
+    params.phraseRisk === "risky" ||
+    params.harmonicRisk === "incompatible_harmonic_jump";
+  const momentumRising = params.crowdMomentum === "rising" || params.crowdMomentum === "surging";
+
+  let executionStrategy:
+    | "smooth_blend"
+    | "harmonic_overlay"
+    | "vocal_guarded_transition"
+    | "percussive_swap"
+    | "fast_cut"
+    | "energy_ramp_blend"
+    | "hold_state" = "smooth_blend";
+  const executionReasoning: string[] = [];
+
+  if (unsafeSignals || params.confidence < 52) {
+    executionStrategy = params.confidence < 46 ? "hold_state" : "fast_cut";
+    executionReasoning.push(
+      executionStrategy === "hold_state"
+        ? "Confidence weak or conflicting continuity signals; hold state to preserve safety."
+        : "Confidence degradation triggered recovery-oriented fast cut.",
+    );
+  } else if (params.vocalOverlapRisk >= 62 || params.phraseCompatibility === "vocal_overlap_risk") {
+    executionStrategy = "vocal_guarded_transition";
+    executionReasoning.push("Vocal overlap risk elevated; guarded transition selected.");
+  } else if (energyDelta >= 1.4 && momentumRising && params.beatRisk !== "risky") {
+    executionStrategy = "energy_ramp_blend";
+    executionReasoning.push("Energy escalation path detected with stable continuity.");
+  } else if (strongHarmonic && safePhrase && stableSync) {
+    executionStrategy =
+      params.harmonicCompatibility === "match" || params.harmonicCompatibility === "adjacent"
+        ? "harmonic_overlay"
+        : "smooth_blend";
+    executionReasoning.push("Harmonic-safe melodic continuity detected.");
+  } else if (stableSync && !strongHarmonic) {
+    executionStrategy = "percussive_swap";
+    executionReasoning.push("Beat continuity strong but harmonic continuity weak.");
+  } else if (conflictingSignals) {
+    executionStrategy = "hold_state";
+    executionReasoning.push("Signal conflicts detected; hold state selected.");
+  } else {
+    executionStrategy = "smooth_blend";
+    executionReasoning.push("Default smooth blend selected for continuity preservation.");
+  }
+
+  const transitionAggressiveness = Number(
+    clamp(
+      executionStrategy === "fast_cut"
+        ? 84
+        : executionStrategy === "percussive_swap"
+          ? 66
+          : executionStrategy === "energy_ramp_blend"
+            ? 62
+            : executionStrategy === "vocal_guarded_transition"
+              ? 54
+              : executionStrategy === "hold_state"
+                ? 18
+                : 48,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const transitionComplexity = Number(
+    clamp(
+      executionStrategy === "harmonic_overlay"
+        ? 74
+        : executionStrategy === "vocal_guarded_transition"
+          ? 78
+          : executionStrategy === "energy_ramp_blend"
+            ? 68
+            : executionStrategy === "percussive_swap"
+              ? 58
+              : executionStrategy === "fast_cut"
+                ? 46
+                : executionStrategy === "hold_state"
+                  ? 24
+                  : 52,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const operatorAttentionRequired =
+    executionStrategy === "fast_cut" ||
+    executionStrategy === "hold_state" ||
+    executionStrategy === "vocal_guarded_transition" ||
+    params.vocalOverlapRisk >= 62 ||
+    params.syncCompatibility === "unstable_window" ||
+    conflictingSignals;
+
+  return {
+    executionStrategy,
+    executionReasoning,
+    aggressiveness: transitionAggressiveness,
+    transitionComplexity,
+    operatorAttentionRequired,
+  };
+}
+
+function evaluateExecutionWindow(params: {
+  transitionTimingConfidence: number;
+  downbeatAlignmentConfidence: number;
+  signalConflicts?: string[];
+  playbackDeviceReady?: boolean;
+}) {
+  const conflictPenalty = (params.signalConflicts?.length ?? 0) * 7;
+  const baseWindowScore = clamp(
+    params.transitionTimingConfidence * 0.55 +
+      params.downbeatAlignmentConfidence * 0.35 +
+      (params.playbackDeviceReady ? 10 : -15) -
+      conflictPenalty,
+    0,
+    100,
+  );
+  const executionWindowState: ExecutionWindowState =
+    !params.playbackDeviceReady
+      ? "expired_window"
+      : baseWindowScore >= 78
+        ? "stable_window"
+        : baseWindowScore >= 62
+          ? "narrow_window"
+          : "unstable_window";
+  const estimatedCueLeadTime = Number(
+    clamp(executionWindowState === "stable_window" ? 9 : executionWindowState === "narrow_window" ? 6 : 3, 2, 12).toFixed(2),
+  );
+  const blendEntryConfidence = Number(clamp(baseWindowScore * 0.92, 0, 100).toFixed(2));
+  const rollbackSafetyMargin = Number(
+    clamp(
+      (executionWindowState === "stable_window" ? 78 : executionWindowState === "narrow_window" ? 58 : 32) -
+        conflictPenalty * 0.45,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  return {
+    executionWindowState,
+    estimatedCueLeadTime,
+    blendEntryConfidence,
+    rollbackSafetyMargin,
+  };
+}
+
+export function evaluateExecutionReadiness(params: {
+  userId?: string;
+  playbackState: PlaybackOrchestrationState | null;
+  executionStrategy: ExecutionStrategy;
+  confidence: number;
+  riskLevel: string;
+  transitionTimingConfidence: number;
+  downbeatAlignmentConfidence: number;
+  operatorAttentionRequired: boolean;
+  signalConflicts?: string[];
+  playbackDeviceReady?: boolean;
+  queueFreshnessScore?: number;
+}) {
+  const playbackDeviceReady =
+    params.playbackDeviceReady ??
+    Boolean(params.playbackState?.activeDevice && !params.playbackState?.activeDevice?.is_restricted);
+  const playbackProgressStable = typeof params.playbackState?.playbackState?.progressMs === "number";
+  const playbackSynced = params.playbackState?.queueStatus?.syncStatus === "synced";
+  const queueFreshnessScore = clamp(params.queueFreshnessScore ?? 65, 0, 100);
+  if (params.userId) {
+    if (params.playbackState?.playbackState?.isPlaying) refreshPlaybackHeartbeat(params.userId);
+    if (params.playbackState?.activeDevice) refreshDeviceHeartbeat(params.userId);
+    if (queueFreshnessScore >= 55) refreshQueueHeartbeat(params.userId);
+  }
+  const heartbeat = evaluateTelemetryFreshness(params.userId ?? "anonymous");
+  const activePlaybackProtection =
+    Boolean(params.playbackState?.playbackState?.isPlaying) &&
+    Boolean(params.playbackState?.activeDevice) &&
+    heartbeat.heartbeatContinuityScore >= 68 &&
+    (params.playbackState?.queueStatus?.syncStatus === "synced");
+  const conflictCount = params.signalConflicts?.length ?? 0;
+
+  const deviceSynchronizationConfidence = Number(
+    clamp(
+      (playbackDeviceReady ? 45 : 10) + (playbackProgressStable ? 28 : 8) + (playbackSynced ? 22 : 6),
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const transportStability = Number(
+    clamp(deviceSynchronizationConfidence * 0.62 + params.downbeatAlignmentConfidence * 0.18 + queueFreshnessScore * 0.2, 0, 100).toFixed(2),
+  );
+  const rawWindowIntel = evaluateExecutionWindow({
+    transitionTimingConfidence: params.transitionTimingConfidence,
+    downbeatAlignmentConfidence: params.downbeatAlignmentConfidence,
+    signalConflicts: params.signalConflicts,
+    playbackDeviceReady,
+  });
+  const windowIntel =
+    activePlaybackProtection &&
+    deviceSynchronizationConfidence > 75 &&
+    rawWindowIntel.executionWindowState === "unstable_window"
+      ? {
+          ...rawWindowIntel,
+          executionWindowState: "narrow_window" as const,
+          blendEntryConfidence: Number(clamp(rawWindowIntel.blendEntryConfidence + 6, 0, 100).toFixed(2)),
+        }
+      : rawWindowIntel;
+  const cuePreparationConfidence = Number(
+    clamp(
+      params.transitionTimingConfidence * 0.45 +
+        windowIntel.blendEntryConfidence * 0.35 +
+        queueFreshnessScore * 0.2 -
+        conflictCount * 4,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const rollbackReadiness = Number(
+    clamp(
+      windowIntel.rollbackSafetyMargin * 0.5 +
+        (100 - (params.executionStrategy === "fast_cut" ? 72 : params.executionStrategy === "hold_state" ? 32 : 48)) *
+          0.3 +
+        (params.operatorAttentionRequired ? -8 : 6),
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const executionBlockers: string[] = [];
+  if (!playbackDeviceReady) executionBlockers.push("no_active_device");
+  if (queueFreshnessScore < 40 && !activePlaybackProtection) executionBlockers.push("stale_telemetry");
+  if (windowIntel.executionWindowState === "unstable_window" || windowIntel.executionWindowState === "expired_window")
+    executionBlockers.push("unstable_execution_window");
+  if (conflictCount >= 3) executionBlockers.push("conflicting_runtime_signals");
+  if (params.confidence < 48) executionBlockers.push("low_confidence");
+
+  const executionReadinessScore = Number(
+    clamp(
+      params.confidence * 0.24 +
+        transportStability * 0.22 +
+        cuePreparationConfidence * 0.24 +
+        rollbackReadiness * 0.14 +
+        queueFreshnessScore * 0.16 -
+        conflictCount * 4.5,
+      0,
+      100,
+    ).toFixed(2),
+  );
+  const executionReadiness: ExecutionReadinessState =
+    executionBlockers.length > 0
+      ? "blocked"
+      : params.operatorAttentionRequired || params.riskLevel === "high"
+        ? "guarded"
+        : executionReadinessScore >= 76
+          ? "ready"
+          : "prepare";
+  const graceStabilizationActive = activePlaybackProtection && executionReadiness === "blocked";
+  const stabilizedReadiness: ExecutionReadinessState =
+    graceStabilizationActive &&
+    !executionBlockers.includes("no_active_device") &&
+    !executionBlockers.includes("unstable_execution_window")
+      ? "prepare"
+      : executionReadiness;
+
+  return {
+    executionReadinessScore,
+    executionReadiness: stabilizedReadiness,
+    executionBlockers,
+    transportStability,
+    cuePreparationConfidence,
+    rollbackReadiness,
+    deviceSynchronizationConfidence,
+    executionWindowState: windowIntel.executionWindowState,
+    estimatedCueLeadTime: windowIntel.estimatedCueLeadTime,
+    blendEntryConfidence: windowIntel.blendEntryConfidence,
+    rollbackSafetyMargin: windowIntel.rollbackSafetyMargin,
+    playbackFreshnessAgeMs: heartbeat.playbackAgeMs,
+    heartbeatContinuity: heartbeat.heartbeatContinuityScore,
+    heartbeatDrift: heartbeat.heartbeatDrift,
+    freshnessRecoveryState:
+      heartbeat.playbackFreshness === "stale" || heartbeat.deviceFreshness === "stale"
+        ? ("recovering" as const)
+        : heartbeat.playbackFreshness === "expired" || heartbeat.deviceFreshness === "expired"
+          ? ("degraded" as const)
+          : ("stable" as const),
+    graceStabilizationActive,
+  };
 }
 
 function toMoodPhase(phase: string | null | undefined): QueueTrack["moodPhase"] {
@@ -580,6 +2464,13 @@ function buildTransitionSignature(
     vocalOverlapRisk?: number;
     syncCompatibility?: string;
     beatRisk?: "safe" | "watch" | "risky";
+    executionStrategy?: string;
+    transitionAggressiveness?: number;
+    transitionComplexity?: number;
+    executionReadiness?: ExecutionReadinessState;
+    executionWindowState?: ExecutionWindowState;
+    transportStability?: number;
+    rollbackReadiness?: number;
   },
 ) {
   const current = `${toTrackSignaturePart(currentTrack.title)}:${toTrackSignaturePart(currentTrack.artist)}`;
@@ -595,7 +2486,14 @@ function buildTransitionSignature(
   const vocalOverlapSig = toTrackSignaturePart(String(Math.round(phrase?.vocalOverlapRisk ?? 0)));
   const syncCompatibilitySig = toTrackSignaturePart(phrase?.syncCompatibility ?? "unknown");
   const beatRiskSig = toTrackSignaturePart(phrase?.beatRisk ?? "watch");
-  return `${current}->${candidate}|keys:${currentKeySig}:${candidateKeySig}|camelot:${camelotSig}|phrase:${phraseCompatibilitySig}:${dropAlignmentSig}:${vocalOverlapSig}|sync:${syncCompatibilitySig}:${beatRiskSig}`;
+  const strategySig = toTrackSignaturePart(phrase?.executionStrategy ?? "unknown");
+  const aggressivenessSig = toTrackSignaturePart(String(Math.round(phrase?.transitionAggressiveness ?? 0)));
+  const complexitySig = toTrackSignaturePart(String(Math.round(phrase?.transitionComplexity ?? 0)));
+  const readinessSig = toTrackSignaturePart(phrase?.executionReadiness ?? "unknown");
+  const windowSig = toTrackSignaturePart(phrase?.executionWindowState ?? "unknown");
+  const transportSig = toTrackSignaturePart(String(Math.round(phrase?.transportStability ?? 0)));
+  const rollbackSig = toTrackSignaturePart(String(Math.round(phrase?.rollbackReadiness ?? 0)));
+  return `${current}->${candidate}|keys:${currentKeySig}:${candidateKeySig}|camelot:${camelotSig}|phrase:${phraseCompatibilitySig}:${dropAlignmentSig}:${vocalOverlapSig}|sync:${syncCompatibilitySig}:${beatRiskSig}|strategy:${strategySig}:${aggressivenessSig}:${complexitySig}|readiness:${readinessSig}:${windowSig}:${transportSig}:${rollbackSig}`;
 }
 
 function computeTransitionMemoryBias(params: {
@@ -610,6 +2508,15 @@ function computeTransitionMemoryBias(params: {
     phraseRisk?: "safe" | "watch" | "risky";
   syncCompatibility?: string;
   beatRisk?: "safe" | "watch" | "risky";
+  executionStrategy?: string;
+  transitionAggressiveness?: number;
+  transitionComplexity?: number;
+  executionReasoning?: string[];
+  operatorAttentionRequired?: boolean;
+  executionReadiness?: ExecutionReadinessState;
+  executionWindowState?: ExecutionWindowState;
+  transportStability?: number;
+  rollbackReadiness?: number;
   memoryPatterns?: RuntimeMemoryPattern[];
 }) {
   if (!params.memoryPatterns?.length) {
@@ -627,6 +2534,13 @@ function computeTransitionMemoryBias(params: {
         vocalOverlapRisk: params.vocalOverlapRisk,
         syncCompatibility: params.syncCompatibility,
         beatRisk: params.beatRisk,
+        executionStrategy: params.executionStrategy,
+        transitionAggressiveness: params.transitionAggressiveness,
+        transitionComplexity: params.transitionComplexity,
+        executionReadiness: params.executionReadiness,
+        executionWindowState: params.executionWindowState,
+        transportStability: params.transportStability,
+        rollbackReadiness: params.rollbackReadiness,
       }),
     };
   }
@@ -641,6 +2555,13 @@ function computeTransitionMemoryBias(params: {
     vocalOverlapRisk: params.vocalOverlapRisk,
     syncCompatibility: params.syncCompatibility,
     beatRisk: params.beatRisk,
+    executionStrategy: params.executionStrategy,
+    transitionAggressiveness: params.transitionAggressiveness,
+    transitionComplexity: params.transitionComplexity,
+    executionReadiness: params.executionReadiness,
+    executionWindowState: params.executionWindowState,
+    transportStability: params.transportStability,
+    rollbackReadiness: params.rollbackReadiness,
   });
   const matchingPatterns = params.memoryPatterns.filter((pattern) =>
     pattern.pattern_context.toLowerCase().includes(signature),
@@ -660,6 +2581,8 @@ function computeTransitionMemoryBias(params: {
   let weightSum = 0;
   let successMatches = 0;
   let failedMatches = 0;
+  let strategySuccessMatches = 0;
+  let strategyPenaltyMatches = 0;
 
   for (const pattern of matchingPatterns) {
     const reinforcementWeight =
@@ -702,6 +2625,9 @@ function computeTransitionMemoryBias(params: {
 
     if (pattern.pattern_type === "successful_transition") successMatches += 1;
     if (pattern.pattern_type === "failed_transition") failedMatches += 1;
+    const context = pattern.pattern_context.toLowerCase();
+    if (context.includes("|strategy:harmonic_overlay")) strategySuccessMatches += 1;
+    if (context.includes("|strategy:fast_cut")) strategyPenaltyMatches += 1;
   }
 
   const normalizer = Math.max(weightSum, 1);
@@ -713,6 +2639,12 @@ function computeTransitionMemoryBias(params: {
   }
   if (failedMatches > 0) {
     rationale.push(`Matched ${failedMatches} failed transition memory pattern(s).`);
+  }
+  if (strategySuccessMatches > 0) {
+    rationale.push("Execution strategy continuity reinforced by prior outcomes.");
+  }
+  if (strategyPenaltyMatches > 0) {
+    rationale.push("Repeated fast-cut history increases caution for strategy stability.");
   }
 
   return {
@@ -854,6 +2786,33 @@ export function scoreTransitionCandidate(params: {
     currentTrack: params.currentTrack,
     candidateTrack: params.candidateTrack,
   });
+  const strategyDecision = determineExecutionStrategy({
+    harmonicCompatibility: harmonic.camelotCompatibility,
+    phraseCompatibility: phrase.phraseCompatibility,
+    syncCompatibility: beatSync.syncCompatibility,
+    vocalOverlapRisk: phrase.vocalOverlapRisk,
+    beatRisk: beatSync.beatRisk,
+    harmonicRisk: harmonic.harmonicRisk,
+    phraseRisk: phrase.phraseRisk,
+    currentEnergy: params.currentTrack.energy,
+    targetEnergy: params.candidateTrack.energy,
+    crowdMomentum:
+      (params.candidateTrack.crowdMomentumProjection ?? 50) >= 78
+        ? "surging"
+        : (params.candidateTrack.crowdMomentumProjection ?? 50) >= 62
+          ? "rising"
+          : (params.candidateTrack.crowdMomentumProjection ?? 50) <= 38
+            ? "low"
+            : "steady",
+    confidence:
+      bpmScore * 0.15 +
+      enrichedEnergyScore * 0.15 +
+      moodScore * 0.1 +
+      harmonic.harmonicCompatibilityScore * 0.2 +
+      phrase.phraseAlignmentScore * 0.2 +
+      beatSync.beatSyncScore * 0.2,
+  });
+  const strategyDecisionReasoning = strategyDecision.executionReasoning;
   const memoryBias = computeTransitionMemoryBias({
     currentTrack: params.currentTrack,
     candidateTrack: params.candidateTrack,
@@ -865,6 +2824,13 @@ export function scoreTransitionCandidate(params: {
     vocalOverlapRisk: phrase.vocalOverlapRisk,
     syncCompatibility: beatSync.syncCompatibility,
     beatRisk: beatSync.beatRisk as "safe" | "watch" | "risky",
+    executionStrategy: strategyDecision.executionStrategy,
+    transitionAggressiveness: strategyDecision.aggressiveness,
+    transitionComplexity: strategyDecision.transitionComplexity,
+    executionReadiness: "prepare",
+    executionWindowState: beatSync.syncCompatibility === "unstable_window" ? "unstable_window" : "narrow_window",
+    transportStability: Number(clamp((beatSync.transitionTimingConfidence + beatSync.downbeatAlignmentConfidence) / 2, 0, 100).toFixed(2)),
+    rollbackReadiness: Number(clamp(100 - strategyDecision.aggressiveness * 0.6, 0, 100).toFixed(2)),
     memoryPatterns: params.memoryPatterns,
   });
 
@@ -918,12 +2884,7 @@ export function scoreTransitionCandidate(params: {
     estimatedSwapWindow: beatSync.estimatedSwapWindow,
     estimatedBlendDuration: beatSync.estimatedBlendDuration,
     downbeatAlignmentQuality: beatSync.downbeatAlignmentQuality,
-    transitionExecutionStyle: deriveTransitionExecutionStyle({
-      phraseCompatibility: phrase.phraseCompatibility,
-      beatRisk: beatSync.beatRisk as "safe" | "watch" | "risky",
-      harmonicRisk: harmonic.harmonicRisk,
-      vocalOverlapRisk: phrase.vocalOverlapRisk,
-    }),
+    transitionExecutionStyle: strategyDecision.executionStrategy,
     vocalDensityScore: Number(((params.candidateTrack.vocalDensityScore ?? (params.candidateTrack.speechiness ?? 0) * 100)).toFixed(2)),
     instrumentalBlendConfidence: Number(
       (
@@ -1138,6 +3099,63 @@ export async function evaluateTransitionEngine(params: {
       vocalScore:
         vocalClashScore,
     });
+  const currentTrackProfile: TrackPhraseProfile = {
+    phraseLength: 16,
+    currentPhrase: Math.max(0, Math.round((playback.playbackState?.progressMs ?? 0) / 2000)),
+    phraseSection: derivePhraseSection({
+      phase: session?.current_phase ?? null,
+      speechiness: topTransitionCandidate?.speechiness ?? 0.2,
+      instrumentalness: topTransitionCandidate?.instrumentalness ?? 0.35,
+      energy: session?.current_energy ?? 5,
+      valence: (topTransitionCandidate?.candidateTrack as RuntimeCandidateTrack | undefined)?.valence ?? 0.5,
+      breakdownPresence: false,
+    }),
+    energyLevel: clamp((session?.current_energy ?? 5) * 10, 0, 100),
+    vocalDensity: deriveVocalDensity(topTransitionCandidate?.speechiness ?? 0.2),
+    instrumentalIntensity: clamp((topTransitionCandidate?.instrumentalness ?? 0.35) * 100, 0, 100),
+    harmonicKey: currentTrackKey ?? "unknown",
+    bpm: session?.current_bpm ?? 110,
+    danceability: clamp((topTransitionCandidate?.danceability ?? 0.62) * 100, 0, 100),
+    tensionLevel: clamp(
+      (100 - (harmonicCompatibilityScore ?? 65)) * 0.35 +
+        (100 - (energyFlowScore ?? 60)) * 0.2 +
+        (session?.current_energy ?? 5) * 6 +
+        (topTransitionCandidate?.speechiness ?? 0.2) * 20,
+      0,
+      100,
+    ),
+  };
+  const nextTrackProfile: TrackPhraseProfile = {
+    phraseLength: topTransitionCandidate?.candidateTrack.phraseLength ?? 16,
+    currentPhrase: Math.max(0, Math.round(topTransitionCandidate?.estimatedMixInTiming ?? 8)),
+    phraseSection: derivePhraseSection({
+      phase: session?.current_phase ?? null,
+      speechiness: topTransitionCandidate?.speechiness ?? 0.2,
+      instrumentalness: topTransitionCandidate?.instrumentalness ?? 0.35,
+      energy: topTransitionCandidate?.candidateTrack.energy ?? session?.current_energy ?? 5,
+      valence: (topTransitionCandidate?.candidateTrack as RuntimeCandidateTrack | undefined)?.valence ?? 0.5,
+      dropIntensity: (topTransitionCandidate?.candidateTrack as RuntimeCandidateTrack | undefined)?.dropIntensity ?? 5,
+      breakdownPresence: (topTransitionCandidate?.candidateTrack as RuntimeCandidateTrack | undefined)?.breakdownPresence ?? false,
+    }),
+    energyLevel: clamp((topTransitionCandidate?.candidateTrack.energy ?? session?.current_energy ?? 5) * 10, 0, 100),
+    vocalDensity: deriveVocalDensity(topTransitionCandidate?.speechiness ?? 0.2),
+    instrumentalIntensity: clamp((topTransitionCandidate?.instrumentalness ?? 0.35) * 100, 0, 100),
+    harmonicKey: topTransitionCandidate?.candidateKey ?? "unknown",
+    bpm: topTransitionCandidate?.candidateTrack.bpm ?? session?.current_bpm ?? 110,
+    danceability: clamp(((topTransitionCandidate?.danceability ?? 0.62) as number) * 100, 0, 100),
+    tensionLevel: clamp(
+      (100 - harmonicCompatibilityScore) * 0.35 +
+        (100 - energyFlowScore) * 0.2 +
+        (topTransitionCandidate?.candidateTrack.energy ?? session?.current_energy ?? 5) * 6 +
+        (topTransitionCandidate?.speechiness ?? 0.2) * 20,
+      0,
+      100,
+    ),
+  };
+  const transitionCompatibility: TransitionCompatibilityResult = analyzeTransitionCompatibility(
+    currentTrackProfile,
+    nextTrackProfile,
+  );
   const reasons: string[] = [];
   if (!params.assistedAutonomousEnabled) reasons.push("Assisted-autonomous mode disabled.");
   if (cooldownBlocked) reasons.push("Transition cooldown active.");
@@ -1202,6 +3220,10 @@ export async function evaluateTransitionEngine(params: {
     reasons.push("High vocal density candidate; potential vocal overlap risk.");
   if ((topTransitionCandidate?.instrumentalBlendConfidence ?? 0) >= 70)
     reasons.push("Instrumental blend confidence is favorable for layering.");
+  reasons.push(
+    `DJ compatibility ${transitionCompatibility.compatibilityScore.toFixed(1)} (${transitionCompatibility.riskLevel}) with ${transitionCompatibility.recommendedArchetype.replace(/_/g, " ")} archetype.`,
+  );
+  reasons.push(...transitionCompatibility.reasoning.slice(0, 4));
 
   let score = 86;
   if (!params.assistedAutonomousEnabled) score -= 35;
@@ -1230,6 +3252,14 @@ score +=
   (harmonicCompatibilityScore -
     70) *
   0.15;
+  score += (transitionCompatibility.compatibilityScore - 70) * 0.36;
+  score += (transitionCompatibility.phraseAlignmentScore - 70) * 0.16;
+  score += (transitionCompatibility.harmonicScore - 70) * 0.14;
+  score += (transitionCompatibility.vocalClashScore - 70) * 0.14;
+  score += (transitionCompatibility.tensionContinuityScore - 70) * 0.12;
+  if (transitionCompatibility.riskLevel === "dangerous") score -= 24;
+  else if (transitionCompatibility.riskLevel === "risky") score -= 11;
+  else if (transitionCompatibility.riskLevel === "safe") score += 6;
   score += topTransitionCandidate?.memoryBias.confidenceBias ?? 0;
   score += audioState.drift.silenceDetected ? -8 : 0;
   score += audioState.drift.spikeDetected ? -4 : 0;
@@ -1242,24 +3272,320 @@ score +=
     100,
   );
   const baselineRiskLevel = computeRiskLevel({ confidence, telemetry });
-  const riskLevel = applyRiskDelta(baselineRiskLevel, topTransitionCandidate?.memoryBias.riskDelta ?? 0);
+  const djRiskDelta =
+    transitionCompatibility.riskLevel === "dangerous"
+      ? 1.6
+      : transitionCompatibility.riskLevel === "risky"
+        ? 0.9
+        : transitionCompatibility.riskLevel === "moderate"
+          ? 0.25
+          : -0.5;
+  const riskLevel = applyRiskDelta(
+    baselineRiskLevel,
+    (topTransitionCandidate?.memoryBias.riskDelta ?? 0) + djRiskDelta,
+  );
 
   const shouldTransition =
     params.assistedAutonomousEnabled &&
     !cooldownBlocked &&
     !duplicateTransition &&
     !unsafeEnergySpike &&
-    Boolean(topRecommendation);
+    Boolean(topRecommendation) &&
+    (topTransitionCandidate?.transitionExecutionStyle ?? "smooth_blend") !== "hold_state";
   const holdEnergy = !shouldTransition || (session ? session.current_energy >= 8.6 : false);
   const rampEnergy = shouldTransition && Boolean(session && session.current_energy <= 6.8);
   const cooldownEnergy = shouldTransition && Boolean(session && session.current_energy >= 8.8);
-  const nextAction: TransitionExecutionPlan["nextAction"] = !params.assistedAutonomousEnabled
+  const strategyAssessment = determineExecutionStrategy({
+    harmonicCompatibility: topTransitionCandidate?.camelotCompatibility ?? "unknown",
+    phraseCompatibility: topTransitionCandidate?.phraseCompatibility ?? "neutral",
+    syncCompatibility: topTransitionCandidate?.syncCompatibility ?? "matched_bar_window",
+    vocalOverlapRisk: topTransitionCandidate?.vocalOverlapRisk ?? 40,
+    beatRisk: topTransitionCandidate?.beatRisk ?? "watch",
+    harmonicRisk: topTransitionCandidate?.harmonicRisk ?? "neutral_missing_key_metadata",
+    phraseRisk: (topTransitionCandidate?.phraseRisk as "safe" | "watch" | "risky" | undefined) ?? "watch",
+    currentEnergy: session?.current_energy ?? 5,
+    targetEnergy: topRecommendation?.energy ?? session?.current_energy ?? 5,
+    crowdMomentum: crowdMomentumBucketFromProjection(topTransitionCandidate?.crowdMomentumProjection ?? 50),
+    confidence,
+  });
+  const queueFreshnessScore =
+    telemetry?.freshness === "fresh"
+      ? 92
+      : telemetry?.freshness === "stale"
+        ? 66
+        : telemetry?.freshness === "expired"
+          ? 34
+          : 52;
+  const readinessAssessment = evaluateExecutionReadiness({
+    userId: params.userId,
+    playbackState: playback,
+    executionStrategy: strategyAssessment.executionStrategy,
+    confidence,
+    riskLevel,
+    transitionTimingConfidence: topTransitionCandidate?.transitionTimingConfidence ?? 64,
+    downbeatAlignmentConfidence: topTransitionCandidate?.downbeatAlignmentConfidence ?? 64,
+    operatorAttentionRequired: strategyAssessment.operatorAttentionRequired,
+    signalConflicts: reasons.filter((reason) =>
+      reason.toLowerCase().includes("conflict") ||
+      reason.toLowerCase().includes("unstable") ||
+      reason.toLowerCase().includes("risky"),
+    ),
+    playbackDeviceReady: Boolean(playback.activeDevice && !playback.activeDevice.is_restricted),
+    queueFreshnessScore,
+  });
+  const runtimeConvergenceScore = clamp(
+    readinessAssessment.heartbeatContinuity * 0.35 +
+      readinessAssessment.transportStability * 0.35 +
+      (100 - readinessAssessment.heartbeatDrift) * 0.15 +
+      readinessAssessment.executionReadinessScore * 0.15,
+    0,
+    100,
+  );
+  const phraseTelemetry = evaluatePhraseTiming({
+    userId: params.userId,
+    playbackProgressMs: playback.playbackState?.progressMs ?? 0,
+    bpm: session?.current_bpm ?? topRecommendation?.bpm ?? 120,
+    energy: session?.current_energy ?? topRecommendation?.energy ?? 5,
+    transitionAggressiveness: strategyAssessment.aggressiveness,
+    executionWindowState: readinessAssessment.executionWindowState,
+    playbackFreshnessAgeMs: readinessAssessment.playbackFreshnessAgeMs,
+    runtimeConvergenceScore: Number(runtimeConvergenceScore.toFixed(2)),
+    crowdMomentumProjection: topTransitionCandidate?.crowdMomentumProjection ?? 50,
+    phraseLengthHint: topTransitionCandidate?.candidateTrack.phraseLength ?? null,
+    phraseRisk: (topTransitionCandidate?.phraseRisk as "safe" | "watch" | "risky" | undefined) ?? "watch",
+    vocalOverlapRisk: topTransitionCandidate?.vocalOverlapRisk ?? 42,
+    heartbeatDrift: readinessAssessment.heartbeatDrift,
+  });
+  const harmonicEmotion = evaluateHarmonicEmotion({
+    userId: params.userId,
+    camelotCompatibility,
+    bpmContinuityScore: bpmCompatibilityScore,
+    phraseTimingConfidence: phraseTelemetry.transitionTimingConfidence,
+    transitionAggressiveness: strategyAssessment.aggressiveness,
+    vocalOverlapRisk: topTransitionCandidate?.vocalOverlapRisk ?? 42,
+    energyTrajectory: (topRecommendation?.energy ?? session?.current_energy ?? 5) - (session?.current_energy ?? 5),
+    crowdMomentum: topTransitionCandidate?.crowdMomentumProjection ?? 50,
+    transitionPressure: phraseTelemetry.transitionPressure,
+    phraseStability: phraseTelemetry.phraseStability,
+    runtimeConvergenceScore: Number(runtimeConvergenceScore.toFixed(2)),
+  });
+  const crowdAdaptation = evaluateCrowdAdaptation({
+    userId: params.userId,
+    emotionalContinuity: harmonicEmotion.emotionalContinuity,
+    transitionPressure: phraseTelemetry.transitionPressure,
+    phraseTimingConfidence: phraseTelemetry.transitionTimingConfidence,
+    harmonicTension: harmonicEmotion.harmonicTension,
+    recentTransitionCadence: clamp((100 - readinessAssessment.estimatedCueLeadTime * 6.5), 0, 100),
+    runtimeConvergence: Number(runtimeConvergenceScore.toFixed(2)),
+    crowdEmotionalAlignment: harmonicEmotion.crowdEmotionalAlignment,
+    energyTrajectory: (topRecommendation?.energy ?? session?.current_energy ?? 5) - (session?.current_energy ?? 5),
+    bpmMovement: Math.abs((topRecommendation?.bpm ?? session?.current_bpm ?? 110) - (session?.current_bpm ?? 110)),
+    recentStabilizationSuccess: clamp((100 - readinessAssessment.executionBlockers.length * 15), 0, 100),
+    heartbeatDrift: readinessAssessment.heartbeatDrift,
+  });
+  const narrativeFlow = evaluateNarrativeFlow({
+    userId: params.userId,
+    crowdAdaptation: {
+      crowdMomentumScore: crowdAdaptation.crowdMomentumScore,
+      crowdFatiguePressure: crowdAdaptation.crowdFatiguePressure,
+      crowdRecoveryConfidence: crowdAdaptation.crowdRecoveryConfidence,
+      crowdEnergyVolatility: crowdAdaptation.crowdEnergyVolatility,
+      crowdHypeSaturation: crowdAdaptation.crowdHypeSaturation,
+      crowdAdaptationConfidence: crowdAdaptation.crowdAdaptationConfidence,
+    },
+    emotionalContinuity: harmonicEmotion.emotionalContinuity,
+    harmonicTension: harmonicEmotion.harmonicTension,
+    phraseTimingConfidence: phraseTelemetry.transitionTimingConfidence,
+    runtimeConvergence: Number(runtimeConvergenceScore.toFixed(2)),
+    recentTransitionCadence: clamp((100 - readinessAssessment.estimatedCueLeadTime * 6.5), 0, 100),
+    bpmMovementTrajectory: Math.abs((topRecommendation?.bpm ?? session?.current_bpm ?? 110) - (session?.current_bpm ?? 110)),
+    recentRecoveryCycles: clamp((100 - readinessAssessment.rollbackReadiness) / 20, 0, 6),
+    transitionPressure: phraseTelemetry.transitionPressure,
+    emotionalDrift: harmonicEmotion.emotionalEnergyDrift,
+    recentStabilizationSuccess: clamp((100 - readinessAssessment.executionBlockers.length * 15), 0, 100),
+  });
+  const adaptiveCadence = evaluateAdaptiveCadence({
+    userId: params.userId,
+    narrativeMomentum: narrativeFlow.narrativeMomentum,
+    crowdFatiguePressure: crowdAdaptation.crowdFatiguePressure,
+    transitionPressure: phraseTelemetry.transitionPressure,
+    emotionalContinuity: harmonicEmotion.emotionalContinuity,
+    phraseTimingConfidence: phraseTelemetry.transitionTimingConfidence,
+    runtimeConvergence: Number(runtimeConvergenceScore.toFixed(2)),
+    transitionCadenceFrequency: clamp((100 - readinessAssessment.estimatedCueLeadTime * 6.5), 0, 100),
+    recentRecoveryCycles: clamp((100 - readinessAssessment.rollbackReadiness) / 20, 0, 6),
+    hypeSaturation: crowdAdaptation.crowdHypeSaturation,
+    volatility: crowdAdaptation.crowdEnergyVolatility,
+    energyArcQuality: narrativeFlow.narrativeEnergyArc,
+    stabilizationSuccess: clamp((100 - readinessAssessment.executionBlockers.length * 15), 0, 100),
+    narrativeRecoveryPressure: narrativeFlow.narrativeRecoveryPressure,
+    narrativeContinuity: narrativeFlow.narrativeContinuity,
+  });
+  const orchestrationSynthesis = evaluateOrchestrationSynthesis({
+    userId: params.userId,
+    cadence: {
+      cadenceDensity: adaptiveCadence.cadenceDensity,
+      cadenceAggression: adaptiveCadence.cadenceAggression,
+      cadenceRecoverySpacing: adaptiveCadence.cadenceRecoverySpacing,
+      cadenceEscalationPressure: adaptiveCadence.cadenceEscalationPressure,
+      cadenceBreathingRoom: adaptiveCadence.cadenceBreathingRoom,
+      cadenceStability: adaptiveCadence.cadenceStability,
+      cadenceFatigueLoad: adaptiveCadence.cadenceFatigueLoad,
+      cadenceNarrativeBalance: adaptiveCadence.cadenceNarrativeBalance,
+      cadenceAdaptationConfidence: adaptiveCadence.cadenceAdaptationConfidence,
+    },
+    crowd: {
+      crowdFatiguePressure: crowdAdaptation.crowdFatiguePressure,
+      crowdEnergyVolatility: crowdAdaptation.crowdEnergyVolatility,
+      crowdAdaptationConfidence: crowdAdaptation.crowdAdaptationConfidence,
+      crowdRecoveryConfidence: crowdAdaptation.crowdRecoveryConfidence,
+      crowdHypeSaturation: crowdAdaptation.crowdHypeSaturation,
+    },
+    narrative: {
+      narrativeMomentum: narrativeFlow.narrativeMomentum,
+      narrativeRecoveryPressure: narrativeFlow.narrativeRecoveryPressure,
+      narrativeContinuity: narrativeFlow.narrativeContinuity,
+      narrativeEnergyArc: narrativeFlow.narrativeEnergyArc,
+      narrativeFatigueRisk: narrativeFlow.narrativeFatigueRisk,
+    },
+    harmonic: {
+      emotionalContinuity: harmonicEmotion.emotionalContinuity,
+      harmonicTension: harmonicEmotion.harmonicTension,
+      emotionalEnergyDrift: harmonicEmotion.emotionalEnergyDrift,
+    },
+    phrase: {
+      transitionPressure: phraseTelemetry.transitionPressure,
+      timingConfidence: phraseTelemetry.transitionTimingConfidence,
+      timingRisk: phraseTelemetry.phraseTimingRisk,
+    },
+    runtime: {
+      convergence: Number(runtimeConvergenceScore.toFixed(2)),
+      transportStability: readinessAssessment.transportStability,
+      deviceSynchronizationConfidence: readinessAssessment.deviceSynchronizationConfidence,
+      heartbeatContinuity: readinessAssessment.heartbeatContinuity,
+      heartbeatDrift: readinessAssessment.heartbeatDrift,
+    },
+    mutation: {
+      rollbackReadiness: readinessAssessment.rollbackReadiness,
+      rollbackSafetyMargin: readinessAssessment.rollbackSafetyMargin,
+      executionWindowState: readinessAssessment.executionWindowState,
+    },
+  });
+  const learningProfile = createDefaultTransitionLearningProfile();
+  const learningObservation = applyTransitionLearningObservation({
+    profile: learningProfile,
+    observation: {
+      transitionSucceeded:
+        readinessAssessment.executionReadiness !== "blocked" &&
+        transitionCompatibility.riskLevel !== "dangerous" &&
+        readinessAssessment.rollbackSafetyMargin >= 40,
+      harmonicStability: harmonicEmotion.harmonicCompatibility,
+      phraseAlignment: phraseTelemetry.phraseAlignmentConfidence,
+      crowdRecovery: crowdAdaptation.crowdRecoveryConfidence,
+      operatorInterventions: clamp(Math.round(feedbackSummary.operatorInterventionRate / 20), 0, 5),
+      executionStability: orchestrationSynthesis.orchestrationStability,
+      emotionalContinuity: harmonicEmotion.emotionalContinuity,
+      transportIntegrity: Number(
+        clamp(
+          readinessAssessment.transportStability * 0.55 +
+            readinessAssessment.deviceSynchronizationConfidence * 0.25 +
+            readinessAssessment.rollbackReadiness * 0.2,
+          0,
+          100,
+        ).toFixed(2),
+      ),
+      rollbackTriggered: readinessAssessment.rollbackReadiness < 45 || readinessAssessment.rollbackSafetyMargin < 35,
+    },
+  });
+  const transitionLearningBias = computeTransitionLearningBias(learningObservation.nextProfile);
+  const recoveryLearningBias = computeRecoveryLearningBias(learningObservation.nextProfile);
+  const crowdLearningBias = computeCrowdAdaptationBias(learningObservation.nextProfile);
+  const executionLearningBias = computeExecutionStabilityBias(learningObservation.nextProfile);
+  const boundedLearningConfidenceDelta = Number(
+    clamp(
+      transitionLearningBias.confidenceBias * 0.18 +
+        recoveryLearningBias.recoveryBias * 0.06 +
+        crowdLearningBias.crowdBias * 0.06 +
+        executionLearningBias.stabilityBias * 0.08,
+      -4,
+      4,
+    ).toFixed(2),
+  );
+  const boundedLearningRiskDelta = Number(
+    clamp(
+      transitionLearningBias.riskBias * 0.08 +
+        (executionLearningBias.escalationClamp <= 0.32 ? 0.35 : -0.1),
+      -0.8,
+      0.8,
+    ).toFixed(2),
+  );
+  const learningReadinessDelta = Number(
+    clamp(
+      (recoveryLearningBias.stabilizationPriority - 55) * 0.09 +
+        (crowdLearningBias.crowdBias >= 0 ? 0.6 : -0.6),
+      -3,
+      3,
+    ).toFixed(2),
+  );
+  const confidenceWithLearning = Number(clamp(confidence + boundedLearningConfidenceDelta, 0, 100).toFixed(2));
+  const riskLevelWithLearning = applyRiskDelta(riskLevel, boundedLearningRiskDelta);
+  const executionReadinessScoreWithLearning = Number(
+    clamp(readinessAssessment.executionReadinessScore + learningReadinessDelta, 0, 100).toFixed(2),
+  );
+  reasons.push(
+    boundedLearningConfidenceDelta >= 0
+      ? "Stable supervised learning signals mildly reinforced transition confidence."
+      : "Learning memory reduced confidence due to instability/intervention pressure.",
+  );
+  if (boundedLearningRiskDelta > 0.25) {
+    reasons.push("Learning advisory raised risk posture to preserve supervised safety.");
+  } else if (boundedLearningRiskDelta < -0.25) {
+    reasons.push("Learning advisory relaxed risk posture under stable recovery conditions.");
+  }
+  reasons.push(...learningObservation.reasons.slice(0, 4));
+  const executionStrategy = topTransitionCandidate?.transitionExecutionStyle ?? "hold_state";
+  const strategyReasoning = strategyAssessment.executionReasoning;
+  const transitionAggressiveness =
+    (topTransitionCandidate as { aggressiveness?: number } | null)?.aggressiveness ??
+    strategyAssessment.aggressiveness ??
+    18;
+  const transitionComplexity =
+    (topTransitionCandidate as { transitionComplexity?: number } | null)?.transitionComplexity ?? 24;
+  const operatorAttentionRequired =
+    strategyAssessment.operatorAttentionRequired ??
+    (topTransitionCandidate as { operatorAttentionRequired?: boolean } | null)?.operatorAttentionRequired ??
+    (executionStrategy === "fast_cut" || executionStrategy === "hold_state");
+  const nextAction: TransitionExecutionPlan["nextAction"] = readinessAssessment.executionReadiness === "blocked"
     ? "hold_state"
-    : shouldTransition
-      ? "queue_next_track"
-      : unsafeEnergySpike
-        ? "reject_unsafe_transition"
-        : "hold_state";
+    : !params.assistedAutonomousEnabled
+    ? "hold_state"
+    : executionStrategy === "hold_state"
+      ? "hold_state"
+      : executionStrategy === "fast_cut"
+        ? "prepare_fast_swap"
+        : executionStrategy === "vocal_guarded_transition"
+          ? "guarded_transition"
+          : shouldTransition
+            ? "queue_next_track"
+            : unsafeEnergySpike
+              ? "reject_unsafe_transition"
+              : "hold_state";
+  const blendDuration: TransitionExecutionPlan["blendDuration"] =
+    executionStrategy === "hold_state"
+      ? "none"
+      : executionStrategy === "fast_cut" || executionStrategy === "percussive_swap"
+        ? "short"
+        : executionStrategy === "vocal_guarded_transition"
+          ? "controlled"
+          : "long";
+  const transitionStyle: TransitionExecutionPlan["transitionStyle"] =
+    executionStrategy === "fast_cut"
+      ? "recovery"
+      : executionStrategy === "vocal_guarded_transition"
+        ? "vocal_safe"
+        : executionStrategy === "percussive_swap"
+          ? "aggressive"
+          : "continuous";
 
   const executionPlan: TransitionExecutionPlan = {
     nextAction,
@@ -1274,6 +3600,8 @@ score +=
       10,
     ),
     targetBpm: topRecommendation?.bpm ?? session?.current_bpm ?? 110,
+    blendDuration,
+    transitionStyle,
   };
 
   const decision: TransitionDecision = {
@@ -1285,12 +3613,124 @@ score +=
   };
 
   const result: TransitionEvaluationResult = {
-    autonomousReadiness: shouldTransition ? "ready" : params.assistedAutonomousEnabled ? "needs_review" : "blocked",
+    autonomousReadiness:
+      !shouldTransition || transitionCompatibility.riskLevel === "dangerous"
+        ? params.assistedAutonomousEnabled
+          ? "needs_review"
+          : "blocked"
+        : transitionCompatibility.riskLevel === "risky"
+          ? "needs_review"
+          : "ready",
     decision,
-    confidence: { score: confidence, reasons: reasons.length ? reasons : ["Healthy transition profile."] },
-    riskLevel,
+    confidence: { score: confidenceWithLearning, reasons: reasons.length ? reasons : ["Healthy transition profile."] },
+    riskLevel: riskLevelWithLearning,
     executionPlan,
     telemetry,
+    executionStrategy,
+    executionStrategyReasoning: strategyReasoning,
+    transitionAggressiveness,
+    transitionComplexity,
+    operatorAttentionRequired,
+    executionReadiness: readinessAssessment.executionReadiness,
+    executionReadinessScore: executionReadinessScoreWithLearning,
+    executionBlockers: readinessAssessment.executionBlockers,
+    transportStability: readinessAssessment.transportStability,
+    cuePreparationConfidence: readinessAssessment.cuePreparationConfidence,
+    rollbackReadiness: readinessAssessment.rollbackReadiness,
+    deviceSynchronizationConfidence: readinessAssessment.deviceSynchronizationConfidence,
+    executionWindowState: readinessAssessment.executionWindowState,
+    estimatedCueLeadTime: readinessAssessment.estimatedCueLeadTime,
+    blendEntryConfidence: readinessAssessment.blendEntryConfidence,
+    rollbackSafetyMargin: readinessAssessment.rollbackSafetyMargin,
+    playbackFreshnessAgeMs: readinessAssessment.playbackFreshnessAgeMs,
+    heartbeatContinuity: readinessAssessment.heartbeatContinuity,
+    heartbeatDrift: readinessAssessment.heartbeatDrift,
+    freshnessRecoveryState: readinessAssessment.freshnessRecoveryState,
+    graceStabilizationActive: readinessAssessment.graceStabilizationActive,
+    currentPhrasePosition: phraseTelemetry.currentPhrasePosition,
+    currentPhraseLength: phraseTelemetry.currentPhraseLength,
+    phraseAlignmentConfidence: phraseTelemetry.phraseAlignmentConfidence,
+    phraseTransitionWindow: phraseTelemetry.phraseTransitionWindow,
+    phraseMomentum: phraseTelemetry.phraseMomentum,
+    phraseStability: phraseTelemetry.phraseStability,
+    phraseTimingRisk: phraseTelemetry.phraseTimingRisk,
+    transitionPressure: phraseTelemetry.transitionPressure,
+    transitionTimingConfidence: phraseTelemetry.transitionTimingConfidence,
+    phraseHistory: phraseTelemetry.phraseHistory,
+    transitionPressureHistory: phraseTelemetry.transitionPressureHistory,
+    phraseTimingReasoning: phraseTelemetry.phraseTimingReasoning,
+    harmonicCompatibility: harmonicEmotion.harmonicCompatibility,
+    emotionalContinuity: harmonicEmotion.emotionalContinuity,
+    tonalStability: harmonicEmotion.tonalStability,
+    emotionalMomentum: harmonicEmotion.emotionalMomentum,
+    harmonicTension: harmonicEmotion.harmonicTension,
+    emotionalTransitionRisk: harmonicEmotion.emotionalTransitionRisk,
+    crowdEmotionalAlignment: harmonicEmotion.crowdEmotionalAlignment,
+    emotionalEnergyDrift: harmonicEmotion.emotionalEnergyDrift,
+    harmonicResolutionConfidence: harmonicEmotion.harmonicResolutionConfidence,
+    harmonicHistory: harmonicEmotion.harmonicHistory,
+    emotionalMomentumHistory: harmonicEmotion.emotionalMomentumHistory,
+    harmonicTensionHistory: harmonicEmotion.harmonicTensionHistory,
+    harmonicEmotionReasoning: harmonicEmotion.harmonicEmotionReasoning,
+    crowdEnergyState: crowdAdaptation.crowdEnergyState,
+    crowdMomentumScore: crowdAdaptation.crowdMomentumScore,
+    crowdFatiguePressure: crowdAdaptation.crowdFatiguePressure,
+    crowdRecoveryState: crowdAdaptation.crowdRecoveryState,
+    crowdEngagementConfidence: crowdAdaptation.crowdEngagementConfidence,
+    crowdEnergyVolatility: crowdAdaptation.crowdEnergyVolatility,
+    crowdHypeSaturation: crowdAdaptation.crowdHypeSaturation,
+    crowdRecoveryConfidence: crowdAdaptation.crowdRecoveryConfidence,
+    crowdAdaptationConfidence: crowdAdaptation.crowdAdaptationConfidence,
+    crowdMomentumHistory: crowdAdaptation.crowdMomentumHistory,
+    crowdFatigueHistory: crowdAdaptation.crowdFatigueHistory,
+    crowdRecoveryHistory: crowdAdaptation.crowdRecoveryHistory,
+    crowdVolatilityHistory: crowdAdaptation.crowdVolatilityHistory,
+    crowdAdaptationReasoning: crowdAdaptation.crowdAdaptationReasoning,
+    narrativeFlowState: narrativeFlow.narrativeFlowState,
+    narrativeMomentum: narrativeFlow.narrativeMomentum,
+    narrativeTension: narrativeFlow.narrativeTension,
+    narrativeRecoveryPressure: narrativeFlow.narrativeRecoveryPressure,
+    narrativeProgressionConfidence: narrativeFlow.narrativeProgressionConfidence,
+    narrativeContinuity: narrativeFlow.narrativeContinuity,
+    narrativeEnergyArc: narrativeFlow.narrativeEnergyArc,
+    narrativeResolutionConfidence: narrativeFlow.narrativeResolutionConfidence,
+    narrativeFatigueRisk: narrativeFlow.narrativeFatigueRisk,
+    narrativeJourneyAlignment: narrativeFlow.narrativeJourneyAlignment,
+    narrativeMomentumHistory: narrativeFlow.narrativeMomentumHistory,
+    narrativeTensionHistory: narrativeFlow.narrativeTensionHistory,
+    narrativeRecoveryHistory: narrativeFlow.narrativeRecoveryHistory,
+    narrativeEnergyArcHistory: narrativeFlow.narrativeEnergyArcHistory,
+    narrativeReasoning: narrativeFlow.narrativeReasoning,
+    cadenceState: adaptiveCadence.cadenceState,
+    cadenceDensity: adaptiveCadence.cadenceDensity,
+    cadenceAggression: adaptiveCadence.cadenceAggression,
+    cadenceRecoverySpacing: adaptiveCadence.cadenceRecoverySpacing,
+    cadenceEscalationPressure: adaptiveCadence.cadenceEscalationPressure,
+    cadenceBreathingRoom: adaptiveCadence.cadenceBreathingRoom,
+    cadenceStability: adaptiveCadence.cadenceStability,
+    cadenceAdaptationConfidence: adaptiveCadence.cadenceAdaptationConfidence,
+    cadenceFatigueLoad: adaptiveCadence.cadenceFatigueLoad,
+    cadenceNarrativeBalance: adaptiveCadence.cadenceNarrativeBalance,
+    cadenceDensityHistory: adaptiveCadence.cadenceDensityHistory,
+    cadenceAggressionHistory: adaptiveCadence.cadenceAggressionHistory,
+    cadenceRecoveryHistory: adaptiveCadence.cadenceRecoveryHistory,
+    cadenceStabilityHistory: adaptiveCadence.cadenceStabilityHistory,
+    cadenceReasoning: adaptiveCadence.cadenceReasoning,
+    orchestrationBalanceScore: orchestrationSynthesis.orchestrationBalanceScore,
+    orchestrationConflictPressure: orchestrationSynthesis.orchestrationConflictPressure,
+    orchestrationStability: orchestrationSynthesis.orchestrationStability,
+    orchestrationAlignment: orchestrationSynthesis.orchestrationAlignment,
+    orchestrationRecoveryPriority: orchestrationSynthesis.orchestrationRecoveryPriority,
+    orchestrationEscalationPriority: orchestrationSynthesis.orchestrationEscalationPriority,
+    orchestrationContinuityPriority: orchestrationSynthesis.orchestrationContinuityPriority,
+    orchestrationFatiguePriority: orchestrationSynthesis.orchestrationFatiguePriority,
+    orchestrationNarrativePriority: orchestrationSynthesis.orchestrationNarrativePriority,
+    orchestrationSynthesisConfidence: orchestrationSynthesis.orchestrationSynthesisConfidence,
+    orchestrationBalanceHistory: orchestrationSynthesis.orchestrationBalanceHistory,
+    orchestrationConflictHistory: orchestrationSynthesis.orchestrationConflictHistory,
+    orchestrationAlignmentHistory: orchestrationSynthesis.orchestrationAlignmentHistory,
+    orchestrationStabilityHistory: orchestrationSynthesis.orchestrationStabilityHistory,
+    orchestrationSynthesisReasoning: orchestrationSynthesis.orchestrationSynthesisReasoning,
     currentState: {
       sessionId: session?.id ?? null,
       phase: session?.current_phase ?? null,
@@ -1380,6 +3820,8 @@ score +=
           | "percussive_swap"
           | "harmonic_overlay"
           | "vocal_guarded_transition"
+          | "energy_ramp_blend"
+          | "hold_state"
           | undefined) ?? "percussive_swap",
 
       transitionSignature: topTransitionCandidate?.memoryBias.signature ?? null,
@@ -1387,6 +3829,34 @@ score +=
       memoryConfidenceBias: topTransitionCandidate?.memoryBias.confidenceBias ?? 0,
 
       memoryRiskDelta: topTransitionCandidate?.memoryBias.riskDelta ?? 0,
+
+      learningConfidenceBias: boundedLearningConfidenceDelta,
+
+      learningRiskBias: boundedLearningRiskDelta,
+
+      stabilizationPriority: recoveryLearningBias.stabilizationPriority,
+
+      escalationClamp: executionLearningBias.escalationClamp,
+
+      learningReasons: learningObservation.reasons,
+
+      compatibilityScore: transitionCompatibility.compatibilityScore,
+
+      compatibilityHarmonicScore: transitionCompatibility.harmonicScore,
+
+      compatibilityPhraseAlignmentScore: transitionCompatibility.phraseAlignmentScore,
+
+      compatibilityVocalClashScore: transitionCompatibility.vocalClashScore,
+
+      compatibilityEnergyFlowScore: transitionCompatibility.energyFlowScore,
+
+      compatibilityTensionContinuityScore: transitionCompatibility.tensionContinuityScore,
+
+      recommendedArchetype: transitionCompatibility.recommendedArchetype,
+
+      compatibilityRiskLevel: transitionCompatibility.riskLevel,
+
+      compatibilityReasoning: transitionCompatibility.reasoning,
 
       transitionReasoning: [
         bpmCompatibilityScore >= 85
@@ -1419,6 +3889,14 @@ score +=
         (topTransitionCandidate?.instrumentalBlendConfidence ?? 0) >= 70
           ? "Instrumental blend confidence is strong."
           : "Instrumental blend confidence is moderate.",
+        `DJ compatibility score ${transitionCompatibility.compatibilityScore.toFixed(2)} (${transitionCompatibility.riskLevel}).`,
+        transitionCompatibility.riskLevel === "dangerous"
+          ? "DJ risk model flags this transition as dangerous; autonomy confidence heavily reduced."
+          : transitionCompatibility.riskLevel === "risky"
+            ? "DJ risk model flags elevated risk; supervised transition recommended."
+            : "DJ risk model indicates acceptable transition safety.",
+        `Recommended DJ archetype: ${transitionCompatibility.recommendedArchetype.replace(/_/g, " ")}.`,
+        ...transitionCompatibility.reasoning.slice(0, 4),
         (topTransitionCandidate?.phraseCompatibility ?? "neutral") === "intro_outro_aligned"
           ? "Phrase alignment: intro and outro bars are aligned."
           : (topTransitionCandidate?.phraseCompatibility ?? "neutral") === "instrumental_to_vocal_drop"
@@ -1437,10 +3915,46 @@ score +=
               : (topTransitionCandidate?.syncCompatibility ?? "matched_bar_window") === "late_phrase_alignment"
                 ? "Beat-grid sync warning: late phrase alignment penalty applied."
                 : "Beat-grid sync: matched bar window detected.",
+        readinessAssessment.executionWindowState === "stable_window"
+          ? "Execution window stable for controlled blend."
+          : readinessAssessment.executionWindowState === "expired_window"
+            ? "Execution readiness blocked by stale playback state."
+            : readinessAssessment.executionWindowState === "unstable_window"
+              ? "Playback telemetry freshness degraded."
+              : "Transition window narrow; preparation timing required.",
+        readinessAssessment.rollbackSafetyMargin < 40
+          ? "Rollback margin insufficient for aggressive transition."
+          : "Cue preparation confidence elevated.",
+        readinessAssessment.deviceSynchronizationConfidence < 50
+          ? "Device synchronization unstable."
+          : "Playback transport synchronization remains within bounded stability.",
+        ...phraseTelemetry.phraseTimingReasoning,
+        ...harmonicEmotion.harmonicEmotionReasoning,
+        ...crowdAdaptation.crowdAdaptationReasoning,
+        ...narrativeFlow.narrativeReasoning,
+        ...adaptiveCadence.cadenceReasoning,
+        ...orchestrationSynthesis.orchestrationSynthesisReasoning,
+        ...learningObservation.reasons,
+        ...strategyReasoning,
         ...(topTransitionCandidate?.memoryBias.rationale ?? []),
       ],
     },
   };
+  if (readinessAssessment.executionReadiness === "blocked") {
+    result.decision.shouldTransition = false;
+    result.decision.holdEnergy = true;
+    result.executionPlan.nextAction = "hold_state";
+    result.executionStrategyReasoning = [
+      ...result.executionStrategyReasoning,
+      "Execution readiness blocked; forced hold-state for operator-supervised safety.",
+    ];
+  } else if (readinessAssessment.executionReadiness === "guarded" && result.executionPlan.nextAction === "queue_next_track") {
+    result.executionPlan.nextAction = "guarded_transition";
+    result.executionStrategyReasoning = [
+      ...result.executionStrategyReasoning,
+      "Guarded readiness state requires supervised transition path.",
+    ];
+  }
   return result;
 }
 

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { evaluateTransitionEngine } from "@/lib/ai/transition-engine";
 import { QueueRecommendationWithMeta } from "@/lib/ai/queue-engine";
+import { createOrchestrationEvaluationState } from "@/lib/transition-orchestration/layer-state";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 type Body = {
@@ -28,7 +29,17 @@ export async function POST(request: Request) {
       queueRecommendations: body.queueRecommendations ?? [],
       assistedAutonomousEnabled: body.assistedAutonomousEnabled ?? false,
     });
-    return NextResponse.json({ evaluation });
+    const orchestrationEvaluation = createOrchestrationEvaluationState(evaluation);
+    console.log("[EVALUATION] orchestration recomputed", {
+      readiness: evaluation.autonomousReadiness,
+      confidence: evaluation.confidence.score,
+      risk: evaluation.riskLevel,
+    });
+    return NextResponse.json({
+      stateOrigin: "orchestration_evaluation" as const,
+      evaluation,
+      orchestrationEvaluation,
+    });
   } catch (error) {
     return NextResponse.json(
       { message: error instanceof Error ? error.message : "Failed to evaluate transition engine." },

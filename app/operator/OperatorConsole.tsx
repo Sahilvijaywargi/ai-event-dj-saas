@@ -9,6 +9,7 @@ import {
   evaluateRuntimePerformanceState,
   getAdaptivePollingOptimization,
   getNetworkEfficiencyMetrics,
+  type RuntimePerformanceState,
 } from "@/lib/runtime/performance";
 import { QaReadinessPill } from "@/app/qa/QaReadinessPill";
 
@@ -137,6 +138,67 @@ function vibeLabel(energy: number) {
   return "Chill";
 }
 
+const OPERATOR_PERF_HYDRATION_BASELINE: RuntimePerformanceState = {
+  polling: {
+    recommendedIntervalMs: 6500,
+    pollingIntensity: "low",
+    backgroundOptimized: true,
+    batteryFriendlyMode: false,
+    shouldPoll: true,
+    reason: "Awaiting client telemetry bind.",
+  },
+  network: {
+    online: true,
+    effectiveType: "unknown",
+    saveData: false,
+    retrySpacingMs: 4500,
+    requestFailureRate: 0,
+  },
+  renderLoad: "low",
+  renderCountEstimate: 8,
+  issues: [],
+};
+
+function computeOperatorPerformanceTelemetry(params: {
+  failureCount: number;
+  requestCount: number;
+  pollingBackoffMs?: number;
+  isRecovering?: boolean;
+}): RuntimePerformanceState {
+  const visible = document.visibilityState === "visible";
+  const online = navigator.onLine;
+  const connection = (navigator as Navigator & {
+    connection?: { effectiveType?: string; saveData?: boolean };
+  }).connection;
+  const effectiveType = connection?.effectiveType ?? "4g";
+  const saveData = connection?.saveData ?? false;
+  const polling = getAdaptivePollingOptimization({
+    visible,
+    online,
+    saveData,
+    effectiveType,
+    baseIntervalMs: params.pollingBackoffMs ?? 6500,
+  });
+  const network = getNetworkEfficiencyMetrics({
+    online,
+    effectiveType,
+    saveData,
+    failureCount: params.failureCount,
+    requestCount: params.requestCount,
+  });
+  return evaluateRuntimePerformanceState({
+    polling,
+    network,
+    renderCountEstimate: Math.max(
+      8,
+      Math.min(
+        90,
+        params.requestCount * 3 + params.failureCount * 8 + (params.isRecovering ? 12 : 0),
+      ),
+    ),
+  });
+}
+
 export function OperatorConsole({ initialEvents }: OperatorConsoleProps) {
   const [events] = useState<OperatorEvent[]>(initialEvents);
   const [selectedEventId, setSelectedEventId] = useState<string>(initialEvents[0]?.id ?? "");
@@ -175,6 +237,10 @@ export function OperatorConsole({ initialEvents }: OperatorConsoleProps) {
   const [recoveryMessage, setRecoveryMessage] = useState<string | null>(null);
   const [requestCount, setRequestCount] = useState(0);
   const [failureCount, setFailureCount] = useState(0);
+  const [mounted, setMounted] = useState(false);
+  const [performanceState, setPerformanceState] = useState<RuntimePerformanceState>(
+    OPERATOR_PERF_HYDRATION_BASELINE,
+  );
 
   const selector = useMemo(
     () =>
@@ -435,39 +501,37 @@ export function OperatorConsole({ initialEvents }: OperatorConsoleProps) {
     });
   }
 
-  const performanceState = useMemo(() => {
-    const visible = typeof document !== "undefined" ? document.visibilityState === "visible" : true;
-    const online = typeof navigator !== "undefined" ? navigator.onLine : true;
-    const connection = typeof navigator !== "undefined"
-      ? (navigator as Navigator & {
-          connection?: { effectiveType?: string; saveData?: boolean };
-        }).connection
-      : undefined;
-    const effectiveType = connection?.effectiveType ?? "4g";
-    const saveData = connection?.saveData ?? false;
-    const polling = getAdaptivePollingOptimization({
-      visible,
-      online,
-      saveData,
-      effectiveType,
-      baseIntervalMs: reliability?.pollingBackoffMs ?? 6500,
-    });
-    const network = getNetworkEfficiencyMetrics({
-      online,
-      effectiveType,
-      saveData,
-      failureCount,
-      requestCount,
-    });
-    return evaluateRuntimePerformanceState({
-      polling,
-      network,
-      renderCountEstimate: Math.max(
-        8,
-        Math.min(90, requestCount * 3 + failureCount * 8 + (reliability?.isRecovering ? 12 : 0)),
-      ),
-    });
-  }, [failureCount, requestCount, reliability?.isRecovering, reliability?.pollingBackoffMs]);
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  useEffect(() => {
+    if (!mounted) return;
+    setPerformanceState(
+      computeOperatorPerformanceTelemetry({
+        failureCount,
+        requestCount,
+        pollingBackoffMs: reliability?.pollingBackoffMs,
+        isRecovering: reliability?.isRecovering,
+      }),
+    );
+  }, [mounted, failureCount, requestCount, reliability?.isRecovering, reliability?.pollingBackoffMs]);
+
+  useEffect(() => {
+    if (!mounted) return;
+    const onVisibilityChange = () => {
+      setPerformanceState(
+        computeOperatorPerformanceTelemetry({
+          failureCount,
+          requestCount,
+          pollingBackoffMs: reliability?.pollingBackoffMs,
+          isRecovering: reliability?.isRecovering,
+        }),
+      );
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, [mounted, failureCount, requestCount, reliability?.isRecovering, reliability?.pollingBackoffMs]);
 
   useEffect(() => {
     const startup = setTimeout(() => {
@@ -582,6 +646,7 @@ export function OperatorConsole({ initialEvents }: OperatorConsoleProps) {
             <QaReadinessPill />
             <ReliabilityMiniPill
               reliability={reliability}
+              telemetryReady={mounted}
               onReconnect={() => {
                 void callApi("/api/runtime/recovery/reconnect");
               }}

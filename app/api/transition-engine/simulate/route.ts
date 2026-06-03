@@ -2,7 +2,13 @@ import { NextResponse } from "next/server";
 import { evaluateTransitionEngine, TransitionEvaluationResult } from "@/lib/ai/transition-engine";
 import { getRuntimeMemoryPatterns, storeRuntimeMemoryPattern } from "@/lib/ai/runtime-memory";
 import { QueueRecommendationWithMeta } from "@/lib/ai/queue-engine";
+import { refineOrchestrationAfterSimulation } from "@/lib/ai/orchestration-refinement";
 import { analyzeSimulationOutcome, simulateTransitionTimeline } from "@/lib/ai/transition-simulation";
+import {
+  createOrchestrationEvaluationState,
+  type ExecutionRuntimeState,
+  type TransportRuntimeState,
+} from "@/lib/transition-orchestration/layer-state";
 import { serveRecommendationDiagnostics } from "@/lib/spotify/diagnostics-serving";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
@@ -10,6 +16,8 @@ type Body = {
   assistedAutonomousEnabled?: boolean;
   queueRecommendations?: QueueRecommendationWithMeta[];
   evaluation?: TransitionEvaluationResult;
+  transportRuntime?: TransportRuntimeState | null;
+  executionRuntime?: ExecutionRuntimeState | null;
 };
 
 export async function POST(request: Request) {
@@ -51,6 +59,14 @@ export async function POST(request: Request) {
       simulation,
       evaluation,
     });
+    const adaptiveRefinement = refineOrchestrationAfterSimulation({
+      evaluation,
+      simulation,
+      transportRuntime: body.transportRuntime ?? null,
+      executionRuntime: body.executionRuntime ?? null,
+    });
+    const refinedEvaluation = adaptiveRefinement.refinedEvaluation;
+    const orchestrationEvaluation = createOrchestrationEvaluationState(refinedEvaluation);
     if (outcome.reinforcementType !== "neutral") {
       const boundedConfidence = Math.max(0, Math.min(100, evaluation.confidence.score + outcome.confidenceAdjustment));
       const boundedSuccessScore =
@@ -96,14 +112,28 @@ export async function POST(request: Request) {
             weight: 0.65,
             polarity: outcome.riskAdjustment <= 0 ? "positive" : "negative",
           },
+          {
+            source: "transition_engine",
+            signal: "execution_strategy_stability",
+            category: "confidence",
+            value: outcome.stabilityScore / 100,
+            weight: 0.78,
+            polarity:
+              outcome.telemetry.weakestOrchestrationPattern === "strategy_instability"
+                ? "negative"
+                : "positive",
+          },
         ],
         reinforce: outcome.reinforcementType === "reinforce",
       });
     }
     return NextResponse.json({
-      evaluation,
+      stateOrigin: "orchestration_evaluation" as const,
+      evaluation: refinedEvaluation,
+      orchestrationEvaluation,
       simulation,
       reinforcement: outcome,
+      adaptiveRefinement,
     });
   } catch (error) {
     return NextResponse.json(

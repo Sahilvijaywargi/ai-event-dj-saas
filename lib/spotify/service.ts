@@ -19,8 +19,19 @@ type SpotifyTokenResponse = {
   expires_in: number;
 };
 
+export type SpotifyTransportAuthState = "healthy" | "refreshing" | "degraded" | "expired";
+
+export type SpotifyTransportAuthContinuityState = {
+  transportAuthState: SpotifyTransportAuthState;
+  accessTokenExpiresAt: number | null;
+  lastSuccessfulRefreshAt: number | null;
+  refreshFailureCount: number;
+  authRecoveryReasoning: string[];
+};
+
 const SPOTIFY_API_BASE = "https://api.spotify.com/v1";
 const SPOTIFY_ACCOUNTS_BASE = "https://accounts.spotify.com";
+const transportAuthContinuityStore = new Map<string, SpotifyTransportAuthContinuityState>();
 
 function getSpotifyConfig() {
   const env = getServerEnv();
@@ -106,6 +117,176 @@ async function spotifyFetch<T>(
 
     return (await response.json()) as T;
   }, 1);
+}
+
+function appendAuthReasoning(existing: string[], next: string) {
+  return [...existing.slice(-7), next];
+}
+
+function getDefaultTransportAuthContinuityState(): SpotifyTransportAuthContinuityState {
+  return {
+    transportAuthState: "healthy",
+    accessTokenExpiresAt: null,
+    lastSuccessfulRefreshAt: null,
+    refreshFailureCount: 0,
+    authRecoveryReasoning: ["Spotify transport auth continuity initialized."],
+  };
+}
+
+export function getSpotifyTransportAuthContinuityState(userId: string): SpotifyTransportAuthContinuityState {
+  return transportAuthContinuityStore.get(userId) ?? getDefaultTransportAuthContinuityState();
+}
+
+type EnsureSpotifyTransportAuthParams = {
+  userId: string;
+  minValidityMs?: number;
+  forceRefresh?: boolean;
+  runtimeTickActive?: boolean;
+  supervisedExecutionActive?: boolean;
+  deviceHealthy?: boolean;
+  reason?: string;
+};
+
+export async function ensureSpotifyTransportAuth(params: EnsureSpotifyTransportAuthParams) {
+  const minValidityMs = params.minValidityMs ?? 90_000;
+  const continuity = getSpotifyTransportAuthContinuityState(params.userId);
+  const supabase = await createSupabaseServerClient();
+  const { data, error } = await supabase
+    .from("spotify_connections")
+    .select("*")
+    .eq("user_id", params.userId)
+    .maybeSingle();
+  if (error) {
+    const degraded: SpotifyTransportAuthContinuityState = {
+      ...continuity,
+      transportAuthState: "degraded",
+      authRecoveryReasoning: appendAuthReasoning(
+        continuity.authRecoveryReasoning,
+        "Auth refresh failed while loading connection record.",
+      ),
+    };
+    transportAuthContinuityStore.set(params.userId, degraded);
+    return { ok: false, accessToken: null, state: degraded };
+  }
+  if (!data) {
+    const expired: SpotifyTransportAuthContinuityState = {
+      ...continuity,
+      transportAuthState: "expired",
+      accessTokenExpiresAt: null,
+      authRecoveryReasoning: appendAuthReasoning(
+        continuity.authRecoveryReasoning,
+        "Execution blocked due to auth expiry or missing Spotify connection.",
+      ),
+    };
+    transportAuthContinuityStore.set(params.userId, expired);
+    return { ok: false, accessToken: null, state: expired };
+  }
+  const connection = data as SpotifyConnectionRecord;
+  const now = Date.now();
+  const expiresAtMs = new Date(connection.expires_at).getTime();
+  let accessToken: string;
+  let refreshToken: string | null = null;
+  try {
+    accessToken = decryptToken(connection.access_token);
+    refreshToken = connection.refresh_token ? decryptToken(connection.refresh_token) : null;
+  } catch {
+    const degraded: SpotifyTransportAuthContinuityState = {
+      ...continuity,
+      transportAuthState: "degraded",
+      accessTokenExpiresAt: expiresAtMs,
+      refreshFailureCount: continuity.refreshFailureCount + 1,
+      authRecoveryReasoning: appendAuthReasoning(
+        continuity.authRecoveryReasoning,
+        "Auth refresh failed because token decryption failed.",
+      ),
+    };
+    transportAuthContinuityStore.set(params.userId, degraded);
+    return { ok: false, accessToken: null, state: degraded };
+  }
+  const expiresSoon = now + minValidityMs >= expiresAtMs;
+  const shouldRefresh = Boolean(params.forceRefresh) || expiresSoon;
+  const canProactivelyRefresh =
+    Boolean(params.runtimeTickActive) || Boolean(params.supervisedExecutionActive) || Boolean(params.reason);
+  if (!shouldRefresh || !canProactivelyRefresh) {
+    const healthy: SpotifyTransportAuthContinuityState = {
+      ...continuity,
+      transportAuthState: "healthy",
+      accessTokenExpiresAt: expiresAtMs,
+      authRecoveryReasoning: appendAuthReasoning(
+        continuity.authRecoveryReasoning,
+        "Auth healthy; proactive refresh not required.",
+      ),
+    };
+    transportAuthContinuityStore.set(params.userId, healthy);
+    return { ok: true, accessToken, state: healthy };
+  }
+  if (!refreshToken) {
+    const expired: SpotifyTransportAuthContinuityState = {
+      ...continuity,
+      transportAuthState: expiresAtMs <= now ? "expired" : "degraded",
+      accessTokenExpiresAt: expiresAtMs,
+      refreshFailureCount: continuity.refreshFailureCount + 1,
+      authRecoveryReasoning: appendAuthReasoning(
+        continuity.authRecoveryReasoning,
+        "Execution blocked due to auth expiry: refresh token missing.",
+      ),
+    };
+    transportAuthContinuityStore.set(params.userId, expired);
+    return { ok: false, accessToken: null, state: expired };
+  }
+  const refreshing: SpotifyTransportAuthContinuityState = {
+    ...continuity,
+    transportAuthState: "refreshing",
+    accessTokenExpiresAt: expiresAtMs,
+    authRecoveryReasoning: appendAuthReasoning(
+      continuity.authRecoveryReasoning,
+      "Refreshing Spotify auth proactively for supervised continuity.",
+    ),
+  };
+  transportAuthContinuityStore.set(params.userId, refreshing);
+  try {
+    const refreshed = await refreshSpotifyToken(refreshToken);
+    accessToken = refreshed.access_token;
+    const newRefreshToken = refreshed.refresh_token ?? refreshToken;
+    const newExpiresAt = new Date(Date.now() + refreshed.expires_in * 1000).toISOString();
+    const { error: updateError } = await supabase
+      .from("spotify_connections")
+      .update({
+        access_token: encryptToken(accessToken),
+        refresh_token: encryptToken(newRefreshToken),
+        expires_at: newExpiresAt,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("user_id", params.userId);
+    if (updateError) throw new Error(updateError.message);
+    const healthy: SpotifyTransportAuthContinuityState = {
+      ...refreshing,
+      transportAuthState: "healthy",
+      accessTokenExpiresAt: new Date(newExpiresAt).getTime(),
+      lastSuccessfulRefreshAt: Date.now(),
+      refreshFailureCount: 0,
+      authRecoveryReasoning: appendAuthReasoning(
+        refreshing.authRecoveryReasoning,
+        params.runtimeTickActive
+          ? "Runtime preserved auth continuity with proactive refresh."
+          : "Auth refreshed proactively.",
+      ),
+    };
+    transportAuthContinuityStore.set(params.userId, healthy);
+    return { ok: true, accessToken, state: healthy };
+  } catch {
+    const failed: SpotifyTransportAuthContinuityState = {
+      ...refreshing,
+      transportAuthState: expiresAtMs <= now ? "expired" : "degraded",
+      refreshFailureCount: continuity.refreshFailureCount + 1,
+      authRecoveryReasoning: appendAuthReasoning(
+        refreshing.authRecoveryReasoning,
+        "Auth refresh failed; execution blocked due to auth continuity degradation.",
+      ),
+    };
+    transportAuthContinuityStore.set(params.userId, failed);
+    return { ok: false, accessToken: null, state: failed };
+  }
 }
 
 export function getSpotifyConnectUrl(state: string) {
@@ -215,39 +396,28 @@ export async function removeSpotifyConnection(userId: string) {
 }
 
 export async function getValidSpotifyAccessToken(userId: string) {
-  const supabase = await createSupabaseServerClient();
-  const { data, error } = await supabase
-    .from("spotify_connections")
-    .select("*")
-    .eq("user_id", userId)
-    .maybeSingle();
-
-  if (error) throw new Error(error.message);
-  if (!data) throw new Error("Spotify account not connected.");
-
-  const connection = data as SpotifyConnectionRecord;
-  let accessToken = decryptToken(connection.access_token);
-  const refreshToken = decryptToken(connection.refresh_token);
-  const expiresAtMs = new Date(connection.expires_at).getTime();
-
-  if (Date.now() + 45_000 >= expiresAtMs) {
-    const refreshed = await refreshSpotifyToken(refreshToken);
-    accessToken = refreshed.access_token;
-    const newRefreshToken = refreshed.refresh_token ?? refreshToken;
-    const newExpiresAt = new Date(Date.now() + refreshed.expires_in * 1000).toISOString();
-    const { error: updateError } = await supabase
-      .from("spotify_connections")
-      .update({
-        access_token: encryptToken(accessToken),
-        refresh_token: encryptToken(newRefreshToken),
-        expires_at: newExpiresAt,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("user_id", userId);
-    if (updateError) throw new Error(updateError.message);
+  const auth = await ensureSpotifyTransportAuth({
+    userId,
+    minValidityMs: 90_000,
+    reason: "general_access_token_validation",
+  });
+  if (!auth.ok || !auth.accessToken) {
+    throw new Error("Spotify auth continuity degraded.");
   }
+  return auth.accessToken;
+}
 
-  return accessToken;
+export async function forceRefreshSpotifyAccessToken(userId: string) {
+  const auth = await ensureSpotifyTransportAuth({
+    userId,
+    forceRefresh: true,
+    minValidityMs: 0,
+    reason: "forced_refresh",
+  });
+  if (!auth.ok || !auth.accessToken) {
+    throw new Error("Spotify forced refresh failed.");
+  }
+  return auth.accessToken;
 }
 
 export async function getSpotifyPlaylists(userId: string): Promise<SpotifyPlaylist[]> {

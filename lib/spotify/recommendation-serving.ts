@@ -400,3 +400,30 @@ export async function serveAiSpotifyRecommendations(options: ServingOptions) {
   };
 }
 
+export async function refreshRecommendationFreshnessTimestamps(params: {
+  userId: string;
+  activeDeviceHealthy: boolean;
+}) {
+  if (!params.activeDeviceHealthy) {
+    return { updated: 0, state: "skipped_unhealthy_device" as const };
+  }
+  const supabase = await createSupabaseServerClient();
+  const now = Date.now();
+  const boundedExpiresAt = new Date(now + 1000 * 60 * 8).toISOString();
+  const recencyFloor = new Date(now - 1000 * 60 * 30).toISOString();
+  const { data, error } = await supabase
+    .from("ai_track_recommendations")
+    .update({ expires_at: boundedExpiresAt })
+    .eq("user_id", params.userId)
+    .gte("created_at", recencyFloor)
+    .gt("expires_at", new Date(now).toISOString())
+    .select("id");
+  if (error) {
+    return { updated: 0, state: "failed" as const };
+  }
+  return {
+    updated: data?.length ?? 0,
+    state: (data?.length ?? 0) > 0 ? ("refreshed" as const) : ("noop" as const),
+  };
+}
+
