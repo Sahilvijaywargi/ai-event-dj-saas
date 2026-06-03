@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { TransitionEvaluationResult } from "@/lib/ai/transition-engine";
+import type { OrchestrationRefinementResult } from "@/lib/ai/orchestration-refinement-types";
 import { buildExecutionRuntimeState } from "@/lib/transition-orchestration/execution-runtime-snapshot";
 import { createOrchestrationEvaluationState } from "@/lib/transition-orchestration/layer-state";
 import { apiJsonError, apiUnauthorized } from "@/lib/api/json-route-response";
@@ -15,6 +16,7 @@ type Body = {
   recoveryMode?: boolean;
   /** Musical orchestration context for queue/window prep only — never recomputed here. */
   evaluation?: TransitionEvaluationResult;
+  adaptiveRefinement?: OrchestrationRefinementResult | null;
 };
 
 export async function POST(request: Request) {
@@ -83,6 +85,12 @@ export async function POST(request: Request) {
       userId: user.id,
       evaluation: body.evaluation,
       queueTrack: body.queueTrack ?? false,
+      refinementContext: body.adaptiveRefinement
+        ? {
+            selectedCandidate: body.adaptiveRefinement.selectedCandidate,
+            convergenceMetrics: body.adaptiveRefinement.convergenceMetrics,
+          }
+        : undefined,
     });
     const transportRuntime = await snapshotTransportRuntime({
       userId: user.id,
@@ -100,6 +108,16 @@ export async function POST(request: Request) {
       blockers: result.blockers,
     });
 
+    const validationData = result.data as
+      | {
+          executionValidation?: unknown;
+          historicalTrust?: unknown;
+          learningSignals?: unknown;
+          runtimeTrustCalibration?: unknown;
+          autonomyReadiness?: unknown;
+        }
+      | undefined;
+
     return NextResponse.json(
       {
         ok: result.success,
@@ -109,6 +127,11 @@ export async function POST(request: Request) {
         transportRuntime,
         executionRuntime,
         orchestrationEvaluation: createOrchestrationEvaluationState(body.evaluation),
+        executionValidation: validationData?.executionValidation ?? null,
+        historicalTrust: validationData?.historicalTrust ?? null,
+        learningSignals: validationData?.learningSignals ?? null,
+        runtimeTrustCalibration: validationData?.runtimeTrustCalibration ?? null,
+        autonomyReadiness: validationData?.autonomyReadiness ?? null,
         message: result.success
           ? "Transport execution window prepared."
           : result.blockers.join(", ") || "Transport preparation blocked.",

@@ -31,6 +31,17 @@ import {
   evaluateRollbackStability,
   transitionMutationLifecycle,
 } from "@/lib/spotify/transport-mutation-stabilization";
+import { coordinateTelemetryFreshness } from "@/lib/spotify/telemetry-freshness-coordinator";
+import {
+  inheritFreshnessAcrossMutationLifecycle,
+  freshnessInheritanceAllowsQueuePrep,
+} from "@/lib/spotify/freshness-inheritance-chain";
+import {
+  applyExecutionValidationToPlaybackState,
+  validateExecutionOutcome,
+} from "@/lib/ai/execution-validation-engine";
+import type { OrchestrationConvergenceMetrics } from "@/lib/ai/orchestration-refinement-types";
+import type { AdaptiveOrchestrationCandidate } from "@/lib/ai/adaptive-orchestration";
 import {
   FreshnessGraceEvaluation,
   MutationAuditEntry,
@@ -191,6 +202,30 @@ export type PlaybackExecutionState = {
   telemetryVersion?: number;
   telemetryUpdatedAt?: number;
   verificationSequence?: number;
+  transportMutationHeartbeatAt?: string;
+  queuePreparationHeartbeatAt?: string;
+  freshnessPropagationAt?: string;
+  lastSynchronizationRecoveryAt?: string;
+  freshnessRecoveryState?: "stable" | "recovering" | "degraded";
+  graceStabilizationActive?: boolean;
+  rollbackFreshnessInheritedAt?: string;
+  freshnessInheritanceChain?: import("@/lib/spotify/freshness-inheritance-chain").FreshnessInheritanceChain;
+  globalConvergenceState?: "stable" | "degraded" | "divergent";
+  executionValidationResult?: import("@/lib/ai/execution-validation-types").ExecutionValidationResult;
+  executionTrustScore?: number;
+  executionDriftSeverity?: "low" | "moderate" | "severe";
+  runtimeTrustCalibration?: import("@/lib/ai/runtime-trust-calibration").RuntimeTrustCalibration;
+  autonomyReadiness?: import("@/lib/ai/autonomy-readiness-engine").AutonomyReadinessResult;
+  strategyReliability?: {
+    byStrategy: Partial<
+      Record<
+        import("@/lib/ai/adaptive-orchestration").AdaptiveOrchestrationStrategy,
+        import("@/lib/ai/strategy-reliability-history").StrategyReliabilityProfile
+      >
+    >;
+    globalReliability: number;
+  };
+  runtimeLearningSignals?: string[];
   runtimeObservabilitySummary?: string[];
   degradationSeverity?: "none" | "low" | "moderate" | "high" | "critical";
   executionHealthClassification?:
@@ -258,6 +293,7 @@ function publishExecutionTelemetry(
     telemetryUpdatedAt: now,
     verificationSequence: nextSequence,
     mutationHeartbeatAt: now,
+    transportMutationHeartbeatAt: new Date(now).toISOString(),
   };
   console.log("[TELEMETRY] stabilization finalized", {
     reason,
@@ -1764,19 +1800,52 @@ export async function validateQueueMutation(params: {
       `Preparation rollback readiness ${preparationRollbackReadiness.toFixed(2)} superseded transition estimate ${params.evaluation.rollbackReadiness.toFixed(2)}.`,
     );
   }
-  const telemetryFinalizedOnSession = Boolean(
-    session?.state.verificationFinalized && session.state.stabilizationCompleted,
-  );
-  if (
-    params.evaluation.executionBlockers.includes("stale_telemetry") &&
-    !graceStabilization &&
-    !telemetryFinalizedOnSession
-  ) {
-    blockers.push("stale_playback_telemetry");
+  const freshnessCoordination = coordinateTelemetryFreshness(session?.state ?? null, {
+    playbackAgeMs: heartbeat.playbackAgeMs,
+    deviceAgeMs: heartbeat.deviceAgeMs,
+    queueAgeMs: heartbeat.queueAgeMs,
+  });
+  console.log("[FRESHNESS] coordination", freshnessCoordination);
+
+  const inheritanceAllowsPrep = freshnessInheritanceAllowsQueuePrep({
+    chain: session?.state.freshnessInheritanceChain,
+    coordination: freshnessCoordination,
+    verificationFinalized: session?.state.verificationFinalized,
+  });
+
+  if (params.evaluation.executionBlockers.includes("stale_telemetry")) {
+    if (freshnessCoordination.freshness === "expired" && !inheritanceAllowsPrep) {
+      blockers.push("stale_playback_telemetry");
+    } else if (freshnessCoordination.freshness === "grace_window" || inheritanceAllowsPrep) {
+      warnings.push("telemetry_grace_window_active");
+      if (inheritanceAllowsPrep) {
+        console.log("[CONVERGENCE] telemetry inheritance preserved");
+      }
+    }
   }
   if (params.evaluation.deviceSynchronizationConfidence < 45) blockers.push("transport_sync_critical");
-  if (heartbeat.playbackFreshness === "expired") blockers.push("playback_telemetry_expired");
-  if (heartbeat.deviceFreshness === "expired") blockers.push("device_telemetry_expired");
+  if (heartbeat.playbackFreshness === "expired") {
+    if (freshnessCoordination.freshness === "expired" && !inheritanceAllowsPrep) {
+      blockers.push("playback_telemetry_expired");
+    } else if (freshnessCoordination.freshness === "grace_window" || inheritanceAllowsPrep) {
+      warnings.push("telemetry_grace_window_active");
+    }
+  }
+  if (heartbeat.deviceFreshness === "expired") {
+    if (freshnessCoordination.freshness === "expired" && !inheritanceAllowsPrep) {
+      blockers.push("device_telemetry_expired");
+    } else if (freshnessCoordination.freshness === "grace_window" || inheritanceAllowsPrep) {
+      warnings.push("telemetry_grace_window_active");
+    }
+  }
+  if (heartbeat.queueFreshness === "expired" && freshnessCoordination.freshness === "expired") {
+    blockers.push("queue_telemetry_expired");
+  } else if (
+    (heartbeat.queueFreshness === "stale" || heartbeat.queueFreshness === "expired") &&
+    freshnessCoordination.freshness === "grace_window"
+  ) {
+    warnings.push("telemetry_grace_window_active");
+  }
   if (params.evaluation.executionWindowState === "narrow_window") warnings.push("narrow_execution_window");
   if (params.evaluation.riskLevel === "high") warnings.push("high_execution_risk");
   if (graceStabilization) warnings.push("mutation_freshness_grace_active");
@@ -2180,6 +2249,19 @@ async function stabilizeTransportMutationPreparation(params: {
         verificationState: "precheck_passed",
       },
     );
+    const rollbackSafeCoordination = coordinateTelemetryFreshness(session.state, {
+      playbackAgeMs: params.validation.heartbeat.playbackAgeMs,
+      deviceAgeMs: params.validation.heartbeat.deviceAgeMs,
+      queueAgeMs: params.validation.heartbeat.queueAgeMs,
+    });
+    const inheritanceChain = inheritFreshnessAcrossMutationLifecycle({
+      stabilizationSource: "rollback_ready",
+      sessionId: session.state.mutationSessionId,
+      verificationConfidence: session.state.verificationConfidence,
+      rollbackIntegrity: session.state.rollbackIntegrity,
+      coordination: rollbackSafeCoordination,
+      previousChain: session.state.freshnessInheritanceChain,
+    });
     publishExecutionTelemetry(session, "rollback_safe", {
       verificationFinalized: true,
       stabilizationCompleted: true,
@@ -2187,7 +2269,13 @@ async function stabilizeTransportMutationPreparation(params: {
       queueVerificationResult:
         "Preparation verification finalized; lifecycle reached rollback_ready.",
       rollbackVerificationStage: "rollback_safe",
+      freshnessRecoveryState: "stable",
+      graceStabilizationActive: true,
+      rollbackFreshnessInheritedAt: new Date().toISOString(),
+      freshnessInheritanceChain: inheritanceChain,
+      globalConvergenceState: "stable",
     });
+    console.log("[FRESHNESS] inherited rollback stabilization freshness");
   } else if (blockers.length > 0) {
     if (session.lifecycle.state === "validating" && canTransitionMutationLifecycle("validating", "degraded")) {
       applyMutationLifecycleTransition(
@@ -2523,7 +2611,61 @@ export async function prepareTrackQueue(params: {
   };
 }
 
-export async function queuePreparedTrack(params: { userId: string; evaluation: TransitionEvaluationResult }) {
+function refreshQueuePreparationTelemetry(session: ExecutionSession, userId: string) {
+  propagateTransportFreshnessSynchronization({ userId, session, phase: "prepare_queue" });
+}
+
+export function propagateTransportFreshnessSynchronization(params: {
+  userId: string;
+  session?: ExecutionSession;
+  phase: "prepare_window" | "prepare_queue" | "rollback_safe";
+}) {
+  const session = params.session ?? executionStore.get(params.userId);
+  const now = Date.now();
+  const nowIso = new Date(now).toISOString();
+  refreshPlaybackHeartbeat(params.userId);
+  refreshDeviceHeartbeat(params.userId);
+  refreshQueueHeartbeat(params.userId);
+
+  if (session) {
+    const queueCoordination = coordinateTelemetryFreshness(session.state, {
+      playbackAgeMs: 4_000,
+      deviceAgeMs: 4_000,
+      queueAgeMs: 4_000,
+    });
+    session.state.freshnessInheritanceChain = inheritFreshnessAcrossMutationLifecycle({
+      stabilizationSource: params.phase === "prepare_queue" ? "queue_prepared" : "prepare_window",
+      sessionId: session.state.mutationSessionId,
+      verificationConfidence: session.state.verificationConfidence ?? 72,
+      rollbackIntegrity: session.state.rollbackIntegrity ?? session.state.rollbackIntegrityScore ?? 70,
+      coordination: queueCoordination,
+      previousChain: session.state.freshnessInheritanceChain,
+    });
+    publishExecutionTelemetry(session, `${params.phase}_freshness_propagation`, {
+      queuePreparationHeartbeatAt:
+        params.phase === "prepare_queue" ? nowIso : session.state.queuePreparationHeartbeatAt,
+      freshnessPropagationAt: nowIso,
+      lastSynchronizationRecoveryAt: nowIso,
+      freshnessRecoveryState: "recovering",
+      graceStabilizationActive: queueCoordination.freshness === "grace_window",
+    });
+    executionStore.set(params.userId, session);
+  }
+
+  console.log("[FRESHNESS] telemetry propagation refreshed", { phase: params.phase });
+  if (params.phase === "prepare_queue") {
+    console.log("[FRESHNESS] queue preparation inherited synchronization");
+  }
+}
+
+export async function queuePreparedTrack(params: {
+  userId: string;
+  evaluation: TransitionEvaluationResult;
+  refinementContext?: {
+    selectedCandidate?: AdaptiveOrchestrationCandidate | null;
+    convergenceMetrics?: OrchestrationConvergenceMetrics | null;
+  };
+}) {
   const session = executionStore.get(params.userId);
   if (!session) {
     return {
@@ -2569,6 +2711,24 @@ export async function queuePreparedTrack(params: { userId: string; evaluation: T
       .filter((track): track is { uri: string } => typeof track.uri === "string" && track.uri.length > 0) ?? [];
   const expectedInsertionIndex = preMutationQueue.length;
   const expectedDeviceId = validation.playback.activeDevice?.id ?? null;
+  if (validation.allowed) {
+    refreshQueuePreparationTelemetry(session, params.userId);
+    const queueCoordination = coordinateTelemetryFreshness(session.state, {
+      playbackAgeMs: validation.heartbeat.playbackAgeMs,
+      deviceAgeMs: validation.heartbeat.deviceAgeMs,
+      queueAgeMs: validation.heartbeat.queueAgeMs,
+    });
+    session.state.freshnessInheritanceChain = inheritFreshnessAcrossMutationLifecycle({
+      stabilizationSource: "queue_prepared",
+      sessionId: session.state.mutationSessionId,
+      verificationConfidence: session.state.verificationConfidence,
+      rollbackIntegrity: session.state.rollbackIntegrity,
+      coordination: queueCoordination,
+      previousChain: session.state.freshnessInheritanceChain,
+    });
+    publishExecutionTelemetry(session, "queue_prepared_inheritance");
+  }
+
   if (!validation.allowed) {
     session.mutationFailures += 1;
     transitionMutationState({
@@ -3094,11 +3254,63 @@ export async function queuePreparedTrack(params: { userId: string; evaluation: T
     executionDegradationReasons: [],
   };
   executionStore.set(params.userId, session);
+
+  const validationBundle = await runSupervisedExecutionValidation({
+    userId: params.userId,
+    evaluation: params.evaluation,
+    queueMutationSuccess: true,
+    selectedCandidate: params.refinementContext?.selectedCandidate,
+    convergenceMetrics: params.refinementContext?.convergenceMetrics,
+    executionId: session.state.executionId,
+  });
+
   return {
     ok: true,
     state: getPlaybackExecutionState(params.userId),
     message: "Queue prepared successfully.",
+    executionValidation: validationBundle.validation,
+    historicalTrust: validationBundle.historicalTrust,
+    learningSignals: validationBundle.learningSignals,
+    runtimeTrustCalibration: validationBundle.runtimeTrustCalibration,
+    autonomyReadiness: validationBundle.autonomyReadiness,
   };
+}
+
+export async function runSupervisedExecutionValidation(params: {
+  userId: string;
+  evaluation: TransitionEvaluationResult;
+  queueMutationSuccess: boolean;
+  selectedCandidate?: AdaptiveOrchestrationCandidate | null;
+  convergenceMetrics?: OrchestrationConvergenceMetrics | null;
+  executionId?: string;
+}) {
+  const session = executionStore.get(params.userId);
+  const bundle = await validateExecutionOutcome({
+    userId: params.userId,
+    evaluation: params.evaluation,
+    queueMutationSuccess: params.queueMutationSuccess,
+    selectedCandidate: params.selectedCandidate,
+    convergenceMetrics: params.convergenceMetrics,
+    executionId: params.executionId ?? session?.state.executionId,
+    executionState: session?.state ?? null,
+  });
+  if (session) {
+    const patch = applyExecutionValidationToPlaybackState({
+      userId: params.userId,
+      validation: bundle.validation,
+      historicalTrustScore: bundle.historicalTrust.trustScore,
+      runtimeTrustCalibration: bundle.runtimeTrustCalibration,
+      autonomyReadiness: bundle.autonomyReadiness,
+      strategyReliability: bundle.strategyReliability,
+    });
+    session.state = {
+      ...session.state,
+      ...patch,
+      runtimeLearningSignals: bundle.learningSignals.map((s) => s.description),
+    };
+    executionStore.set(params.userId, session);
+  }
+  return bundle;
 }
 
 export function approvePreparedExecution(userId: string) {

@@ -3,6 +3,21 @@ import "server-only";
 import { TransitionEvaluationResult } from "@/lib/ai/transition-engine";
 import { getPlaybackOrchestrationState, queueAiRecommendedTrack } from "@/lib/spotify/device-orchestrator";
 import { executeGuardedPlaybackCommand } from "@/lib/spotify/playback-guarded";
+import {
+  getPlaybackExecutionState,
+  propagateTransportFreshnessSynchronization,
+  runSupervisedExecutionValidation,
+} from "@/lib/spotify/playback-execution-engine";
+import type { AdaptiveOrchestrationCandidate } from "@/lib/ai/adaptive-orchestration";
+import type { OrchestrationConvergenceMetrics } from "@/lib/ai/orchestration-refinement-types";
+import { coordinateTelemetryFreshness } from "@/lib/spotify/telemetry-freshness-coordinator";
+import { freshnessInheritanceAllowsQueuePrep } from "@/lib/spotify/freshness-inheritance-chain";
+import {
+  evaluateTelemetryFreshness,
+  refreshDeviceHeartbeat,
+  refreshPlaybackHeartbeat,
+  refreshQueueHeartbeat,
+} from "@/lib/runtime/telemetry-heartbeat";
 
 type MutationType =
   | "prepare_queue"
@@ -147,6 +162,10 @@ export async function queuePreparedTransitionTrack(params: {
   userId: string;
   evaluation: TransitionEvaluationResult;
   targetTrackId?: string | null;
+  refinementContext?: {
+    selectedCandidate?: AdaptiveOrchestrationCandidate | null;
+    convergenceMetrics?: OrchestrationConvergenceMetrics | null;
+  };
 }) {
   console.log("[TransportOrchestrator] queuePreparedTransitionTrack:start", {
     at: nowIso(),
@@ -160,7 +179,32 @@ export async function queuePreparedTransitionTrack(params: {
   if (!targetTrackId) blockers.push("missing_target_track");
   if (params.evaluation.executionReadiness === "blocked") blockers.push("execution_readiness_blocked");
   if (params.evaluation.rollbackSafetyMargin < 40) blockers.push("rollback_margin_insufficient");
-  if ((params.evaluation.telemetry?.freshness ?? "unknown") === "expired") blockers.push("stale_telemetry");
+  const executionState = getPlaybackExecutionState(params.userId);
+  const heartbeat = evaluateTelemetryFreshness(params.userId);
+  const freshnessCoordination = coordinateTelemetryFreshness(executionState, {
+    playbackAgeMs: heartbeat.playbackAgeMs,
+    deviceAgeMs: heartbeat.deviceAgeMs,
+    queueAgeMs: heartbeat.queueAgeMs,
+  });
+  console.log("[FRESHNESS] coordination", freshnessCoordination);
+  const inheritanceAllowsPrep = freshnessInheritanceAllowsQueuePrep({
+    chain: executionState.freshnessInheritanceChain,
+    coordination: freshnessCoordination,
+    verificationFinalized: executionState.verificationFinalized,
+  });
+  if (freshnessCoordination.freshness === "expired" && !inheritanceAllowsPrep) {
+    if (
+      (params.evaluation.telemetry?.freshness ?? "unknown") === "expired" ||
+      params.evaluation.executionBlockers.includes("stale_telemetry")
+    ) {
+      blockers.push("stale_telemetry");
+    }
+  } else if (freshnessCoordination.freshness === "grace_window" || inheritanceAllowsPrep) {
+    warnings.push("telemetry_grace_window_active");
+    if (inheritanceAllowsPrep) {
+      console.log("[CONVERGENCE] telemetry inheritance preserved");
+    }
+  }
   if (params.evaluation.deviceSynchronizationConfidence < 50) blockers.push("sync_health_degraded");
 
   const deviceCheck = await verifyActivePlaybackDevice({ userId: params.userId, evaluation: params.evaluation });
@@ -239,6 +283,25 @@ export async function queuePreparedTransitionTrack(params: {
 
   explainability.push("Queue preparation completed under supervised guardrails.");
   console.log("[TransportOrchestrator] queuePreparedTransitionTrack:success", { targetTrackId });
+
+  propagateTransportFreshnessSynchronization({
+    userId: params.userId,
+    phase: "prepare_queue",
+  });
+  refreshPlaybackHeartbeat(params.userId);
+  refreshDeviceHeartbeat(params.userId);
+  refreshQueueHeartbeat(params.userId);
+
+  const postMutationExecution = getPlaybackExecutionState(params.userId);
+  const validationBundle = await runSupervisedExecutionValidation({
+    userId: params.userId,
+    evaluation: params.evaluation,
+    queueMutationSuccess: true,
+    selectedCandidate: params.refinementContext?.selectedCandidate,
+    convergenceMetrics: params.refinementContext?.convergenceMetrics,
+    executionId: postMutationExecution.executionId,
+  });
+
   return {
     success: true,
     mutationType: "prepare_queue",
@@ -250,8 +313,16 @@ export async function queuePreparedTransitionTrack(params: {
     explainability: [
       ...explainability,
       "WHY allowed: readiness, synchronization, and telemetry checks passed.",
+      "Real execution telemetry observed and validated against orchestration prediction.",
     ],
     recoverySuggested: false,
+    data: {
+      executionValidation: validationBundle.validation,
+      historicalTrust: validationBundle.historicalTrust,
+      learningSignals: validationBundle.learningSignals,
+      runtimeTrustCalibration: validationBundle.runtimeTrustCalibration,
+      autonomyReadiness: validationBundle.autonomyReadiness,
+    },
   } satisfies TransportMutationResult;
 }
 
@@ -311,6 +382,10 @@ export async function prepareTransportMutation(params: {
   userId: string;
   evaluation: TransitionEvaluationResult;
   queueTrack?: boolean;
+  refinementContext?: {
+    selectedCandidate?: AdaptiveOrchestrationCandidate | null;
+    convergenceMetrics?: OrchestrationConvergenceMetrics | null;
+  };
 }) {
   const executionWindow = await prepareExecutionWindow({
     userId: params.userId,
@@ -347,11 +422,21 @@ export async function prepareTransportMutation(params: {
     } satisfies TransportMutationResult;
   }
 
+  propagateTransportFreshnessSynchronization({
+    userId: params.userId,
+    phase: "prepare_window",
+  });
+
+  if (!params.queueTrack && executionWindow.executionWindowViability) {
+    console.log("[CONVERGENCE] telemetry inheritance preserved", { phase: "prepare_window" });
+  }
+
   if (params.queueTrack && params.evaluation.executionPlan.targetTrackId) {
     const queued = await queuePreparedTransitionTrack({
       userId: params.userId,
       evaluation: params.evaluation,
       targetTrackId: params.evaluation.executionPlan.targetTrackId,
+      refinementContext: params.refinementContext,
     });
     return {
       ...queued,

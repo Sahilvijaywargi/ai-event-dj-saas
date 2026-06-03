@@ -23,6 +23,10 @@ export type AdaptiveOrchestrationCandidate = {
   executionStability: number;
   recoveryPressure: number;
   orchestrationScore: number;
+  convergenceScore?: number;
+  phraseSurvivability?: number;
+  globallyDivergent?: boolean;
+  convergenceFailures?: string[];
   rejected: boolean;
   rejectionReasons: string[];
   reasoning: string[];

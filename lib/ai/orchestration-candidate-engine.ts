@@ -10,6 +10,8 @@ import {
   mapEvaluationWindowToAdaptive,
   widenExecutionWindow,
 } from "@/lib/ai/adaptive-orchestration";
+import type { PhraseWindowAnalysis } from "@/lib/ai/phrase-window-engine";
+import type { AudioIntelligenceResult } from "@/lib/ai/audio-intelligence-engine";
 
 export type CandidateSimulationProjection = {
   predictedTransitionSuccess: number;
@@ -145,16 +147,66 @@ export function computeOrchestrationCandidateScore(params: {
   projection: CandidateSimulationProjection;
   instability: SimulationInstabilitySignals;
   baselineStrategy: AdaptiveOrchestrationStrategy;
+  phraseWindow?: PhraseWindowAnalysis | null;
+  convergenceScore?: number;
+  synthesisConfidence?: number;
+  audioIntelligence?: AudioIntelligenceResult | null;
 }): number {
   const { candidate, projection, instability, baselineStrategy } = params;
+  const phraseSurvivability =
+    params.phraseWindow?.survivability ?? params.candidate.phraseSurvivability ?? 50;
+  const cadenceRecoveryPotential = params.phraseWindow?.cadenceStability ?? projection.cadenceContinuity;
+  const timingRepairProbability = clamp(
+    (params.phraseWindow ? 100 - params.phraseWindow.timingRisk : 50) * 0.5 +
+      (params.phraseWindow?.safeEntryWindow ? 18 : 0) +
+      (candidate.strategy === "recovery_blend" ? 12 : 0),
+    0,
+    100,
+  );
+  const synthesisStabilization = params.synthesisConfidence ?? projection.narrativeStability;
+  const phraseWindowSafety = clamp(
+    (params.phraseWindow?.safeEntryWindow ? 22 : 0) +
+      (params.phraseWindow?.safeExitWindow ? 18 : 0) -
+      (params.phraseWindow?.timingDriftSeverity === "severe" ? 24 : 0),
+    -30,
+    40,
+  );
+
   let score =
-    projection.projectedExecutionStability * 0.32 +
-    projection.rollbackSurvivability * 0.24 +
-    clamp(100 + projection.projectedConfidenceDrift * 2, 0, 100) * 0.14 +
-    projection.cadenceContinuity * 0.15 +
-    projection.narrativeStability * 0.15;
+    (params.convergenceScore ?? candidate.convergenceScore ?? 0) * 0.28 +
+    phraseSurvivability * 0.22 +
+    cadenceRecoveryPotential * 0.18 +
+    synthesisStabilization * 0.14 +
+    projection.rollbackSurvivability * 0.1 +
+    projection.projectedExecutionStability * 0.08;
+
+  score += timingRepairProbability * 0.04 + phraseWindowSafety;
 
   if (candidate.rejected) return 0;
+
+  if (params.phraseWindow && !params.phraseWindow.safeEntryWindow && candidate.strategy === "fast_cut") {
+    score -= 22;
+  }
+  if (params.phraseWindow?.timingDriftSeverity === "severe") {
+    score -= 16;
+  }
+  if (cadenceRecoveryPotential < 52) {
+    score -= 14;
+  }
+
+  const audio = params.audioIntelligence;
+  if (audio) {
+    score += (audio.audioMixabilityScore - 50) * 0.12;
+    score -= audio.audioTransitionRisk * 0.1;
+    score += audio.grooveContinuity * 0.06;
+    score += audio.vocal.transitionSafety * 0.05;
+    score += audio.drop.survivability * 0.05;
+    if (audio.vocal.hookCollisionRisk >= 65) score -= 18;
+    if (audio.spectral.bassMaskingRisk >= 62) score -= 14;
+    if (audio.drop.risk >= 68) score -= 12;
+    if (audio.spectral.transientConflict >= 60) score -= 10;
+    if (candidate.strategy === "recovery_blend" && audio.drop.survivability >= 58) score += 6;
+  }
 
   if (instability.fastCutInstability && candidate.strategy === "fast_cut") {
     score -= 28;
@@ -357,6 +409,14 @@ export function finalizeCandidates(params: {
   simulation: TransitionSimulationResult;
   instability: SimulationInstabilitySignals;
   baselineStrategy: AdaptiveOrchestrationStrategy;
+  userId?: string;
+  strategyTrustPenalties?: Partial<Record<AdaptiveOrchestrationStrategy, number>>;
+  strategyReliabilityPenalties?: Partial<Record<AdaptiveOrchestrationStrategy, number>>;
+  calibratedTrustScore?: number;
+  autonomyReadinessPenalty?: number;
+  phraseWindow?: PhraseWindowAnalysis | null;
+  synthesisConfidence?: number;
+  audioIntelligence?: AudioIntelligenceResult | null;
 }): AdaptiveOrchestrationCandidate[] {
   return params.candidates.map((candidate) => {
     if (candidate.rejected) {
@@ -385,12 +445,40 @@ export function finalizeCandidates(params: {
         `Cadence continuity ${projection.cadenceContinuity.toFixed(0)}.`,
       ],
     };
-    scored.orchestrationScore = computeOrchestrationCandidateScore({
+    let orchestrationScore = computeOrchestrationCandidateScore({
       candidate: scored,
       projection,
       instability: params.instability,
       baselineStrategy: params.baselineStrategy,
+      phraseWindow: params.phraseWindow,
+      convergenceScore: scored.convergenceScore,
+      synthesisConfidence: params.synthesisConfidence,
+      audioIntelligence: params.audioIntelligence,
     });
+    const trustPenalty = params.strategyTrustPenalties?.[scored.strategy] ?? 0;
+    const reliabilityPenalty = params.strategyReliabilityPenalties?.[scored.strategy] ?? 0;
+    const calibratedPenalty =
+      params.calibratedTrustScore != null && params.calibratedTrustScore < 55 ? 6 : 0;
+    const autonomyPenalty = params.autonomyReadinessPenalty ?? 0;
+    const scoreDelta = trustPenalty + reliabilityPenalty + calibratedPenalty + autonomyPenalty;
+    if (scoreDelta !== 0) {
+      orchestrationScore = Number(clamp(orchestrationScore - scoreDelta, 0, 100).toFixed(2));
+      if (trustPenalty > 0) {
+        scored.reasoning.push(`Historical execution trust penalty -${trustPenalty.toFixed(0)} applied.`);
+      }
+      if (reliabilityPenalty > 0) {
+        scored.reasoning.push(`Strategy reliability penalty -${reliabilityPenalty.toFixed(0)} applied.`);
+      } else if (reliabilityPenalty < 0) {
+        scored.reasoning.push(`Strategy reliability bonus +${Math.abs(reliabilityPenalty).toFixed(0)} applied.`);
+      }
+      if (calibratedPenalty > 0) {
+        scored.reasoning.push("Calibrated runtime trust below threshold — conservatism increased.");
+      }
+      if (autonomyPenalty > 0) {
+        scored.reasoning.push(`Autonomy readiness penalty -${autonomyPenalty.toFixed(0)} applied.`);
+      }
+    }
+    scored.orchestrationScore = orchestrationScore;
     return scored;
   });
 }
@@ -398,25 +486,55 @@ export function finalizeCandidates(params: {
 export function rankOrchestrationCandidates(candidates: AdaptiveOrchestrationCandidate[]) {
   return [...candidates].sort((a, b) => {
     if (a.rejected !== b.rejected) return a.rejected ? 1 : -1;
+    if (a.globallyDivergent !== b.globallyDivergent) return a.globallyDivergent ? 1 : -1;
+    const convergenceA = a.convergenceScore ?? 0;
+    const convergenceB = b.convergenceScore ?? 0;
+    if (convergenceB !== convergenceA) return convergenceB - convergenceA;
+    const phraseA = a.phraseSurvivability ?? 0;
+    const phraseB = b.phraseSurvivability ?? 0;
+    if (phraseB !== phraseA) return phraseB - phraseA;
+    const cadenceA = a.continuityWeight ?? 0;
+    const cadenceB = b.continuityWeight ?? 0;
+    if (cadenceB !== cadenceA) return cadenceB - cadenceA;
     if (b.orchestrationScore !== a.orchestrationScore) {
       return b.orchestrationScore - a.orchestrationScore;
     }
-    return b.executionStability - a.executionStability;
+    if (b.executionStability !== a.executionStability) {
+      return b.executionStability - a.executionStability;
+    }
+    return (b.rollbackPriority ?? 0) - (a.rollbackPriority ?? 0);
   });
 }
 
 export function selectViableOrchestrationCandidate(
   ranked: AdaptiveOrchestrationCandidate[],
 ): AdaptiveOrchestrationCandidate {
-  const viable = ranked.find(
+  const converged = ranked.find(
     (candidate) =>
-      !candidate.rejected && candidate.executionStability >= 58 && candidate.orchestrationScore >= 52,
+      !candidate.rejected &&
+      !candidate.globallyDivergent &&
+      (candidate.convergenceScore ?? 0) >= 68 &&
+      (candidate.phraseSurvivability ?? 0) >= 40 &&
+      candidate.executionStability >= 58 &&
+      (candidate.strategy === "recovery_blend" ||
+        candidate.strategy === "smooth_blend" ||
+        candidate.strategy === "hold_state"),
   );
-  const selected = viable ?? ranked.find((candidate) => !candidate.rejected) ?? ranked[0];
+  const viable = converged ??
+    ranked.find(
+      (candidate) =>
+        !candidate.rejected &&
+        !candidate.globallyDivergent &&
+        candidate.executionStability >= 58 &&
+        candidate.orchestrationScore >= 52,
+    );
+  const holdFallback = ranked.find((c) => c.strategy === "hold_state" && !c.rejected);
+  const selected = viable ?? holdFallback ?? ranked.find((candidate) => !candidate.rejected) ?? ranked[0];
   console.log("[ADAPTIVE] candidate selected", {
     id: selected.id,
     strategy: selected.strategy,
-    score: selected.orchestrationScore,
+    convergenceScore: selected.convergenceScore,
+    orchestrationScore: selected.orchestrationScore,
   });
   return selected;
 }

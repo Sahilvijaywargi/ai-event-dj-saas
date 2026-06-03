@@ -60,6 +60,7 @@ export async function POST(request: Request) {
       evaluation,
     });
     const adaptiveRefinement = refineOrchestrationAfterSimulation({
+      userId: user.id,
       evaluation,
       simulation,
       transportRuntime: body.transportRuntime ?? null,

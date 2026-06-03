@@ -12,7 +12,12 @@ import {
 import { buildRuntimeRecoverySnapshot } from "@/lib/ai/runtime-recovery-intelligence";
 import { buildRuntimeNarrativeSnapshot } from "@/lib/ai/runtime-narrative-orchestration";
 import type { RuntimeRecoveryExecutionContext } from "@/lib/ai/runtime-recovery-intelligence";
-import type { OrchestrationRefinementResult } from "@/lib/ai/orchestration-refinement-types";
+import type {
+  AutonomyReadinessResult,
+  ExecutionValidationResult,
+  OrchestrationRefinementResult,
+  RuntimeTrustCalibration,
+} from "@/lib/ai/orchestration-refinement-types";
 import type {
   ExecutionRuntimeState,
   OrchestrationEvaluationState,
@@ -110,8 +115,36 @@ function simulationActionStyles(action: string) {
   return "border-red-400/35 bg-red-500/10 text-red-100";
 }
 
+function convergenceSeverityStyles(severity: "stable" | "degraded" | "divergent") {
+  if (severity === "stable") return "border-emerald-400/35 bg-emerald-500/10 text-emerald-100";
+  if (severity === "degraded") return "border-amber-400/35 bg-amber-500/10 text-amber-100";
+  return "border-red-400/35 bg-red-500/10 text-red-100";
+}
+
+function autonomyReadinessStyles(
+  readiness: AutonomyReadinessResult["readiness"] | RuntimeTrustCalibration["autonomyReadiness"],
+) {
+  if (readiness === "trusted_runtime") return "border-violet-400/35 bg-violet-500/10 text-violet-100";
+  if (readiness === "bounded_autonomy") return "border-sky-400/35 bg-sky-500/10 text-sky-100";
+  if (readiness === "supervised_only") return "border-amber-400/35 bg-amber-500/10 text-amber-100";
+  return "border-red-400/35 bg-red-500/10 text-red-100";
+}
+
+function trustCalibrationSeverityStyles(severity: RuntimeTrustCalibration["calibrationSeverity"]) {
+  if (severity === "healthy") return "border-emerald-400/35 bg-emerald-500/10 text-emerald-100";
+  if (severity === "warning") return "border-amber-400/35 bg-amber-500/10 text-amber-100";
+  return "border-red-400/35 bg-red-500/10 text-red-100";
+}
+
 export function TransitionEnginePanel({ queueRecommendations }: TransitionEnginePanelProps) {
   const [assistedEnabled, setAssistedEnabled] = useState(false);
+  const [supervisedTestingMode, setSupervisedTestingMode] = useState(true);
+  const [operatorExecutionOverride, setOperatorExecutionOverride] = useState(false);
+  const [executionValidation, setExecutionValidation] = useState<ExecutionValidationResult | null>(null);
+  const [historicalTrustScore, setHistoricalTrustScore] = useState<number | null>(null);
+  const [runtimeTrustCalibration, setRuntimeTrustCalibration] =
+    useState<RuntimeTrustCalibration | null>(null);
+  const [autonomyReadiness, setAutonomyReadiness] = useState<AutonomyReadinessResult | null>(null);
   const [orchestrationEvaluationState, setOrchestrationEvaluationState] =
     useState<OrchestrationEvaluationState | null>(null);
   const [transportRuntimeState, setTransportRuntimeState] = useState<TransportRuntimeState | null>(null);
@@ -257,6 +290,96 @@ export function TransitionEnginePanel({ queueRecommendations }: TransitionEngine
   }, [evaluation, simulation, transportRuntimeState, adaptiveRefinement]);
   const playbackFreshnessState: "healthy" | "aging" | "stale" | "expired" =
     transportRuntimeState?.transportFreshness ?? "healthy";
+
+  const executionConvergenceGate = useMemo(() => {
+    const recovery = adaptiveRefinement?.convergenceRecovery;
+    const convergence =
+      recovery?.recovered && recovery.repairedMetrics
+        ? recovery.repairedMetrics
+        : adaptiveRefinement?.convergenceMetrics;
+    const transportStability = transportRuntimeState?.transportStability ?? evaluation?.transportStability ?? 0;
+    const rollbackReadiness = evaluation?.rollbackReadiness ?? 0;
+    const narrativeContinuity =
+      convergence?.narrativeContinuity ?? evaluation?.narrativeContinuity ?? 0;
+    const cadenceStability = convergence?.cadenceStability ?? evaluation?.cadenceStability ?? 0;
+    const phraseSurvivability = convergence?.phraseTimingSurvivability ?? 0;
+    const phraseTimingRisk = Math.max(
+      0,
+      (evaluation?.phraseTimingRisk ?? 100) -
+        (recovery?.phraseLockRecovery.timingRiskReduction ?? 0),
+    );
+    const synthesisConfidence =
+      convergence?.synthesisConfidence ?? evaluation?.orchestrationSynthesisConfidence ?? 0;
+    const convergenceScore = convergence?.convergenceScore ?? 0;
+    const blockers: string[] = [];
+    if (transportStability <= 75) blockers.push("transport stability must exceed 75");
+    if (rollbackReadiness <= 55) blockers.push("rollback readiness must exceed 55");
+    if (narrativeContinuity <= 65) blockers.push("narrative continuity must exceed 65");
+    if (cadenceStability <= 60) blockers.push("cadence stability must exceed 60");
+    if (phraseTimingRisk >= 40 && phraseSurvivability < 40) {
+      blockers.push("phrase timing risk must stay below 40 after recovery");
+    }
+    if (phraseSurvivability < 35) {
+      blockers.push("phrase survivability remains critically low after recovery");
+    }
+    if (synthesisConfidence <= 60) blockers.push("synthesis confidence must exceed 60");
+    if (convergenceScore <= 70) blockers.push("convergence score must exceed 70");
+    if (
+      adaptiveRefinement?.globalConvergenceState === "divergent" &&
+      !recovery?.recovered
+    ) {
+      blockers.push("global convergence is divergent");
+    }
+    if (
+      recovery?.finalRecommendation === "reject" &&
+      !operatorExecutionOverride &&
+      !supervisedTestingMode
+    ) {
+      blockers.push("convergence recovery rejected execution");
+    }
+    const audio = evaluation?.audioIntelligence;
+    const audioRecovered =
+      evaluation?.audioMixRecovery?.recovered || recovery?.audioMixRecovery?.recovered;
+    if (audio) {
+      if (audio.vocal.overlapRisk >= 72 && !audioRecovered) {
+        blockers.push("vocal overlap dangerous");
+      }
+      if (audio.grooveContinuity < 42 && !audioRecovered) {
+        blockers.push("groove continuity collapsed");
+      }
+      if (audio.spectral.recommendation === "unsafe_overlap" && !audioRecovered) {
+        blockers.push("spectral conflict severe");
+      }
+      if (audio.drop.survivability < 35 && !audioRecovered) {
+        blockers.push("drop survivability too low");
+      }
+    }
+    const calibratedTrust =
+      runtimeTrustCalibration?.trustScore ??
+      adaptiveRefinement?.runtimeTrustCalibration?.trustScore ??
+      historicalTrustScore ??
+      62;
+    if (calibratedTrust < 58 && !operatorExecutionOverride && !supervisedTestingMode) {
+      blockers.push("calibrated runtime trust must be at least 58");
+    }
+    if (
+      autonomyReadiness?.readiness === "not_ready" &&
+      !operatorExecutionOverride &&
+      !supervisedTestingMode
+    ) {
+      blockers.push("autonomy readiness is not_ready");
+    }
+    return { allowed: blockers.length === 0, blockers };
+  }, [
+    adaptiveRefinement,
+    evaluation,
+    transportRuntimeState,
+    historicalTrustScore,
+    runtimeTrustCalibration,
+    autonomyReadiness,
+    operatorExecutionOverride,
+    supervisedTestingMode,
+  ]);
   const runtimeSimulationObservability = useMemo(() => {
     if (!simulation || !evaluation) return null;
     const avgExecutionStability =
@@ -597,6 +720,13 @@ export function TransitionEnginePanel({ queueRecommendations }: TransitionEngine
       setSimulation(data.simulation ?? null);
       setReinforcement(data.reinforcement ?? null);
       setAdaptiveRefinement(data.adaptiveRefinement ?? null);
+      if (data.adaptiveRefinement?.runtimeTrustCalibration) {
+        setRuntimeTrustCalibration(data.adaptiveRefinement.runtimeTrustCalibration);
+        setHistoricalTrustScore(data.adaptiveRefinement.runtimeTrustCalibration.trustScore);
+      }
+      if (data.adaptiveRefinement?.autonomyReadiness) {
+        setAutonomyReadiness(data.adaptiveRefinement.autonomyReadiness);
+      }
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Transition simulation failed.");
     } finally {
@@ -614,11 +744,24 @@ export function TransitionEnginePanel({ queueRecommendations }: TransitionEngine
       const response = await fetch("/api/transition-engine/execute", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ evaluation, mode }),
+        body: JSON.stringify({ evaluation, mode, adaptiveRefinement }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.message ?? "Transition execution failed.");
       setExecutionMessage(data.message ?? "Transition request completed.");
+      if (data.executionValidation) {
+        setExecutionValidation(data.executionValidation);
+      }
+      if (data.historicalTrust?.trustScore != null) {
+        setHistoricalTrustScore(data.historicalTrust.trustScore);
+      }
+      if (data.runtimeTrustCalibration) {
+        setRuntimeTrustCalibration(data.runtimeTrustCalibration);
+        setHistoricalTrustScore(data.runtimeTrustCalibration.trustScore);
+      }
+      if (data.autonomyReadiness) {
+        setAutonomyReadiness(data.autonomyReadiness);
+      }
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Transition execution failed.");
     } finally {
@@ -655,6 +798,7 @@ export function TransitionEnginePanel({ queueRecommendations }: TransitionEngine
                 queueTrack,
                 recoveryMode: false,
                 evaluation,
+                adaptiveRefinement: adaptiveRefinement ?? null,
               },
         ),
       });
@@ -689,6 +833,19 @@ export function TransitionEnginePanel({ queueRecommendations }: TransitionEngine
         setExecutionRuntimeState(data.executionRuntime);
         console.log("[EXECUTION] lifecycle updated");
       }
+      if (data.executionValidation) {
+        setExecutionValidation(data.executionValidation);
+      }
+      if (data.historicalTrust?.trustScore != null) {
+        setHistoricalTrustScore(data.historicalTrust.trustScore);
+      }
+      if (data.runtimeTrustCalibration) {
+        setRuntimeTrustCalibration(data.runtimeTrustCalibration);
+        setHistoricalTrustScore(data.runtimeTrustCalibration.trustScore);
+      }
+      if (data.autonomyReadiness) {
+        setAutonomyReadiness(data.autonomyReadiness);
+      }
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Transport preparation failed.");
     } finally {
@@ -706,14 +863,32 @@ export function TransitionEnginePanel({ queueRecommendations }: TransitionEngine
             Supervised semi-autonomous transition planning with guardrail-aware execution.
           </p>
         </div>
-        <label className="flex items-center gap-2 rounded-xl border border-white/20 bg-white/5 px-3 py-2 text-sm">
-          <input
-            type="checkbox"
-            checked={assistedEnabled}
-            onChange={(event) => setAssistedEnabled(event.target.checked)}
-          />
-          Assisted-autonomous mode
-        </label>
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="flex items-center gap-2 rounded-xl border border-white/20 bg-white/5 px-3 py-2 text-sm">
+            <input
+              type="checkbox"
+              checked={assistedEnabled}
+              onChange={(event) => setAssistedEnabled(event.target.checked)}
+            />
+            Assisted-autonomous mode
+          </label>
+          <label className="flex items-center gap-2 rounded-xl border border-white/20 bg-white/5 px-3 py-2 text-sm">
+            <input
+              type="checkbox"
+              checked={supervisedTestingMode}
+              onChange={(event) => setSupervisedTestingMode(event.target.checked)}
+            />
+            Supervised testing mode
+          </label>
+          <label className="flex items-center gap-2 rounded-xl border border-amber-300/25 bg-amber-500/5 px-3 py-2 text-sm">
+            <input
+              type="checkbox"
+              checked={operatorExecutionOverride}
+              onChange={(event) => setOperatorExecutionOverride(event.target.checked)}
+            />
+            Operator execution override
+          </label>
+        </div>
       </div>
 
       <div className="mb-4 space-y-3">
@@ -915,8 +1090,15 @@ export function TransitionEnginePanel({ queueRecommendations }: TransitionEngine
         </button>
         <button
           onClick={() => executePlan("execute")}
-          disabled={isExecuting || !evaluation || !assistedEnabled}
+          disabled={
+            isExecuting || !evaluation || !assistedEnabled || !executionConvergenceGate.allowed
+          }
           className="rounded-full border border-purple-300/40 px-4 py-2 text-xs font-semibold uppercase tracking-wider text-purple-100 hover:bg-purple-500/10 disabled:opacity-60"
+          title={
+            !executionConvergenceGate.allowed
+              ? executionConvergenceGate.blockers.join("; ")
+              : undefined
+          }
         >
           {isExecuting ? "Executing..." : "Execute Plan"}
         </button>
@@ -983,6 +1165,11 @@ export function TransitionEnginePanel({ queueRecommendations }: TransitionEngine
                   <li key={`${reason}-${index}`}>- {reason}</li>
                 ))}
               </ul>
+              {transportResult.warnings.includes("telemetry_grace_window_active") ? (
+                <p className="mt-3 rounded-lg border border-cyan-300/30 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-100">
+                  Telemetry freshness operating inside bounded rollback grace window.
+                </p>
+              ) : null}
             </div>
           ) : null}
 
@@ -1421,8 +1608,8 @@ export function TransitionEnginePanel({ queueRecommendations }: TransitionEngine
                             : "text-white/75"
                       }
                     >
-                      {candidate.rejected ? "✗" : "•"} {candidate.id.replace(/_/g, " ")} — score{" "}
-                      {candidate.orchestrationScore.toFixed(1)} | stability{" "}
+                      {candidate.rejected ? "✗" : "•"} {candidate.id.replace(/_/g, " ")} — convergence{" "}
+                      {(candidate.convergenceScore ?? 0).toFixed(1)} | stability{" "}
                       {candidate.executionStability.toFixed(1)}
                       {candidate.rejected && candidate.rejectionReasons.length
                         ? ` (${candidate.rejectionReasons.join(", ")})`
@@ -1431,6 +1618,685 @@ export function TransitionEnginePanel({ queueRecommendations }: TransitionEngine
                   ))}
                 </ul>
               </div>
+            </div>
+          ) : null}
+
+          {adaptiveRefinement?.convergenceMetrics ? (
+            <div
+              className={`rounded-xl border p-3 text-sm ${convergenceSeverityStyles(
+                adaptiveRefinement.convergenceMetrics.convergenceSeverity,
+              )}`}
+            >
+              <p className="text-xs uppercase tracking-widest">GLOBAL CONVERGENCE</p>
+              <p className="mt-1 text-xs opacity-80">
+                Holistic orchestration validation — local stability cannot win if global synthesis diverges.
+              </p>
+              <div className="mt-3 grid gap-3 md:grid-cols-4">
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Convergence Score</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.convergenceMetrics.convergenceScore.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Cadence Stability</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.convergenceMetrics.cadenceStability.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Synthesis Confidence</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.convergenceMetrics.synthesisConfidence.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Severity</p>
+                  <p className="mt-1 font-semibold capitalize">
+                    {adaptiveRefinement.globalConvergenceState}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Narrative Continuity</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.convergenceMetrics.narrativeContinuity.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Phrase Survivability</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.convergenceMetrics.phraseTimingSurvivability.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Telemetry Integrity</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.convergenceMetrics.telemetryIntegrity.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Converged</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.convergenceMetrics.converged ? "yes" : "no"}
+                  </p>
+                </div>
+              </div>
+              {adaptiveRefinement.convergenceMetrics.convergenceFailures.length > 0 ? (
+                <ul className="mt-3 space-y-1 text-xs">
+                  {adaptiveRefinement.convergenceMetrics.convergenceFailures.map((failure, index) => (
+                    <li key={`${failure}-${index}`}>- {failure.replace(/_/g, " ")}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
+
+          {adaptiveRefinement?.phraseRecovery ? (
+            <div className="rounded-xl border border-violet-300/30 bg-violet-500/8 p-3 text-sm text-violet-50">
+              <p className="text-xs uppercase tracking-widest text-violet-100/85">PHRASE RECOVERY</p>
+              <div className="mt-3 grid gap-3 md:grid-cols-4">
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest text-white/60">Recovery Strategy</p>
+                  <p className="mt-1 font-semibold capitalize">
+                    {adaptiveRefinement.phraseRecovery.strategy.replace(/_/g, " ")}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest text-white/60">Timing Risk Reduction</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.phraseRecovery.timingRiskReduction.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest text-white/60">Cadence Repair</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.phraseRecovery.cadenceRecovery.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest text-white/60">Recovery Gain</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.phraseRecovery.recoveryGain.toFixed(1)}
+                  </p>
+                </div>
+              </div>
+              <ul className="mt-3 space-y-1 text-xs text-white/80">
+                {adaptiveRefinement.phraseRecovery.reasoning.map((reason, index) => (
+                  <li key={`${reason}-${index}`}>- {reason}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
+          {!executionConvergenceGate.allowed && evaluation ? (
+            <p className="rounded-xl border border-orange-400/30 bg-orange-500/10 px-4 py-3 text-xs text-orange-100">
+              Execute Plan blocked until global convergence gates pass:{" "}
+              {executionConvergenceGate.blockers.join("; ")}.
+            </p>
+          ) : null}
+
+          {executionValidation ? (
+            <div
+              className={`rounded-xl border p-3 text-sm ${
+                executionValidation.validationSeverity === "healthy"
+                  ? "border-emerald-400/35 bg-emerald-500/10 text-emerald-100"
+                  : executionValidation.validationSeverity === "warning"
+                    ? "border-amber-400/35 bg-amber-500/10 text-amber-100"
+                    : "border-red-400/35 bg-red-500/10 text-red-100"
+              }`}
+            >
+              <p className="text-xs uppercase tracking-widest">EXECUTION VALIDATION</p>
+              <p className="mt-1 text-xs opacity-80">
+                Predicted vs actual supervised execution — real playback truth for orchestration learning.
+              </p>
+              <div className="mt-3 grid gap-3 md:grid-cols-4">
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Predicted Stability</p>
+                  <p className="mt-1 font-semibold">
+                    {executionValidation.predictedExecutionStability.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Actual Stability</p>
+                  <p className="mt-1 font-semibold">
+                    {executionValidation.actualExecutionStability.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Drift Score</p>
+                  <p className="mt-1 font-semibold">{executionValidation.orchestrationDrift.toFixed(1)}</p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Trust Delta</p>
+                  <p className="mt-1 font-semibold">
+                    {executionValidation.executionTrustDelta >= 0 ? "+" : ""}
+                    {executionValidation.executionTrustDelta.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Survivability Delta</p>
+                  <p className="mt-1 font-semibold">{executionValidation.survivabilityDelta.toFixed(1)}</p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Outcome</p>
+                  <p className="mt-1 font-semibold capitalize">{executionValidation.executionOutcome}</p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Historical Trust</p>
+                  <p className="mt-1 font-semibold">{historicalTrustScore?.toFixed(1) ?? "—"}</p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Severity</p>
+                  <p className="mt-1 font-semibold capitalize">{executionValidation.validationSeverity}</p>
+                </div>
+              </div>
+              {executionValidation.learningSignals.length > 0 ? (
+                <ul className="mt-3 space-y-1 text-xs">
+                  {executionValidation.learningSignals.map((signal, index) => (
+                    <li key={`${signal}-${index}`}>- {signal}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
+
+          {executionValidation ? (
+            <div className="rounded-xl border border-white/10 bg-black/35 p-3 text-sm text-white/85">
+              <p className="text-xs uppercase tracking-widest text-white/60">EXECUTION DRIFT</p>
+              <div className="mt-3 grid gap-3 md:grid-cols-5">
+                <div className="rounded-lg border border-white/15 bg-black/30 p-3">
+                  <p className="text-xs uppercase tracking-widest text-white/55">Cadence Drift</p>
+                  <p className="mt-1 font-semibold">{executionValidation.cadenceDrift.toFixed(1)}</p>
+                </div>
+                <div className="rounded-lg border border-white/15 bg-black/30 p-3">
+                  <p className="text-xs uppercase tracking-widest text-white/55">Phrase Drift</p>
+                  <p className="mt-1 font-semibold">{executionValidation.phraseDrift.toFixed(1)}</p>
+                </div>
+                <div className="rounded-lg border border-white/15 bg-black/30 p-3">
+                  <p className="text-xs uppercase tracking-widest text-white/55">Recovery Drift</p>
+                  <p className="mt-1 font-semibold">{executionValidation.recoveryDrift.toFixed(1)}</p>
+                </div>
+                <div className="rounded-lg border border-white/15 bg-black/30 p-3">
+                  <p className="text-xs uppercase tracking-widest text-white/55">Transport Drift</p>
+                  <p className="mt-1 font-semibold">{executionValidation.transportDrift.toFixed(1)}</p>
+                </div>
+                <div className="rounded-lg border border-white/15 bg-black/30 p-3">
+                  <p className="text-xs uppercase tracking-widest text-white/55">Convergence Drift</p>
+                  <p className="mt-1 font-semibold">{executionValidation.convergenceDrift.toFixed(1)}</p>
+                </div>
+              </div>
+              <p className="mt-2 text-xs text-white/65 capitalize">
+                Drift severity: {executionValidation.driftSeverity}
+              </p>
+            </div>
+          ) : null}
+
+          {runtimeTrustCalibration ? (
+            <div
+              className={`rounded-xl border p-3 text-sm ${trustCalibrationSeverityStyles(
+                runtimeTrustCalibration.calibrationSeverity,
+              )}`}
+            >
+              <p className="text-xs uppercase tracking-widest">RUNTIME TRUST CALIBRATION</p>
+              <p className="mt-1 text-xs opacity-80">
+                Dynamic trust calibration from supervised execution outcomes — governs when the runtime can be trusted.
+              </p>
+              <div className="mt-3 grid gap-3 md:grid-cols-4">
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Trust Score</p>
+                  <p className="mt-1 font-semibold">{runtimeTrustCalibration.trustScore.toFixed(1)}</p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Trust Trend</p>
+                  <p className="mt-1 font-semibold capitalize">
+                    {runtimeTrustCalibration.trustTrend.replace(/_/g, " ")}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Confidence Accuracy</p>
+                  <p className="mt-1 font-semibold">
+                    {runtimeTrustCalibration.confidenceAccuracy.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Execution Reliability</p>
+                  <p className="mt-1 font-semibold">
+                    {runtimeTrustCalibration.executionReliability.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Recovery Reliability</p>
+                  <p className="mt-1 font-semibold">
+                    {runtimeTrustCalibration.recoveryReliability.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">False Positive Rate</p>
+                  <p className="mt-1 font-semibold">
+                    {runtimeTrustCalibration.falsePositiveRate.toFixed(1)}%
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">False Negative Rate</p>
+                  <p className="mt-1 font-semibold">
+                    {runtimeTrustCalibration.falseNegativeRate.toFixed(1)}%
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Severity</p>
+                  <p className="mt-1 font-semibold capitalize">
+                    {runtimeTrustCalibration.calibrationSeverity}
+                  </p>
+                </div>
+              </div>
+              {runtimeTrustCalibration.calibrationReasons.length > 0 ? (
+                <ul className="mt-3 space-y-1 text-xs">
+                  {runtimeTrustCalibration.calibrationReasons.map((reason, index) => (
+                    <li key={`${reason}-${index}`}>- {reason}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
+
+          {evaluation?.audioIntelligence ? (
+            <div className="rounded-xl border border-fuchsia-400/25 bg-fuchsia-500/10 p-3 text-sm text-fuchsia-50">
+              <p className="text-xs uppercase tracking-widest">AUDIO INTELLIGENCE</p>
+              <div className="mt-3 grid gap-3 md:grid-cols-4">
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Mixability</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.audioIntelligence.audioMixabilityScore.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Groove Continuity</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.audioIntelligence.grooveContinuity.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Spectral Continuity</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.audioIntelligence.spectral.spectralContinuity.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Vocal Safety</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.audioIntelligence.vocal.transitionSafety.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Drop Compatibility</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.audioIntelligence.drop.dropCompatibility.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Audio Confidence</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.audioIntelligence.audioConfidence.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Transition Risk</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.audioIntelligence.audioTransitionRisk.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Mix Recovery</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.audioMixRecovery?.recovered ? "recovered" : "pending"}
+                  </p>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          {evaluation?.audioIntelligence ? (
+            <div className="rounded-xl border border-rose-400/25 bg-rose-500/10 p-3 text-sm text-rose-50">
+              <p className="text-xs uppercase tracking-widest">VOCAL COLLISION ANALYSIS</p>
+              <div className="mt-3 grid gap-3 md:grid-cols-4">
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Overlap Risk</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.audioIntelligence.vocal.overlapRisk.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Hook Collision</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.audioIntelligence.vocal.hookCollisionRisk.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Lyrical Conflict</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.audioIntelligence.vocal.lyricalConflictRisk.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Vocal Density</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.audioIntelligence.vocal.vocalDensity.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3 md:col-span-2">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Recommendation</p>
+                  <p className="mt-1 font-semibold capitalize">
+                    {evaluation.audioIntelligence.vocal.recommendation.replace(/_/g, " ")}
+                  </p>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          {evaluation?.audioIntelligence ? (
+            <div className="rounded-xl border border-violet-400/25 bg-violet-500/10 p-3 text-sm text-violet-50">
+              <p className="text-xs uppercase tracking-widest">SPECTRAL COMPATIBILITY</p>
+              <div className="mt-3 grid gap-3 md:grid-cols-5">
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Low-End Collision</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.audioIntelligence.spectral.lowEndCollision.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Bass Masking</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.audioIntelligence.spectral.bassMaskingRisk.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Transient Conflict</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.audioIntelligence.spectral.transientConflict.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Brightness Conflict</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.audioIntelligence.spectral.brightnessConflict.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Groove Compatibility</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.audioIntelligence.spectral.grooveCompatibility.toFixed(1)}
+                  </p>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          {evaluation?.audioIntelligence ? (
+            <div className="rounded-xl border border-orange-400/25 bg-orange-500/10 p-3 text-sm text-orange-50">
+              <p className="text-xs uppercase tracking-widest">DROP TRANSITION ANALYSIS</p>
+              <div className="mt-3 grid gap-3 md:grid-cols-5">
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Survivability</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.audioIntelligence.drop.survivability.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Tension Continuity</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.audioIntelligence.drop.tensionContinuity.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Emotional Carryover</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.audioIntelligence.drop.emotionalCarryover.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Impact Stability</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.audioIntelligence.drop.impactStability.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Crowd Release</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.audioIntelligence.drop.crowdReleaseAlignment.toFixed(1)}
+                  </p>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          {adaptiveRefinement?.phraseWindowAnalysis ? (
+            <div className="rounded-xl border border-cyan-400/25 bg-cyan-500/10 p-3 text-sm text-cyan-50">
+              <p className="text-xs uppercase tracking-widest">PHRASE TIMING INTELLIGENCE</p>
+              <div className="mt-3 grid gap-3 md:grid-cols-4">
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Section</p>
+                  <p className="mt-1 font-semibold capitalize">
+                    {adaptiveRefinement.phraseWindowAnalysis.sectionType}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Phrase Position</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.phraseWindowAnalysis.phrasePosition.toFixed(0)}%
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Bars Remaining</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.phraseWindowAnalysis.barsRemaining}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Survivability</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.phraseWindowAnalysis.survivability.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Safe Entry</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.phraseWindowAnalysis.safeEntryWindow ? "yes" : "no"}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Safe Exit</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.phraseWindowAnalysis.safeExitWindow ? "yes" : "no"}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Cadence Pressure</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.phraseWindowAnalysis.cadencePressure.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Drift Severity</p>
+                  <p className="mt-1 font-semibold capitalize">
+                    {adaptiveRefinement.phraseWindowAnalysis.timingDriftSeverity}
+                  </p>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          {adaptiveRefinement?.phraseLockRecovery ? (
+            <div className="rounded-xl border border-indigo-400/25 bg-indigo-500/10 p-3 text-sm text-indigo-50">
+              <p className="text-xs uppercase tracking-widest">PHRASE LOCK RECOVERY</p>
+              <div className="mt-3 grid gap-3 md:grid-cols-4">
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Strategy</p>
+                  <p className="mt-1 font-semibold capitalize">
+                    {adaptiveRefinement.phraseLockRecovery.recoveryStrategy.replace(/_/g, " ")}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Bars Delayed</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.phraseLockRecovery.barsDelayed}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Cadence Repair</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.phraseLockRecovery.cadenceRepair.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Risk Reduction</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.phraseLockRecovery.timingRiskReduction.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Retry</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.phraseLockRecovery.retryRecommended ? "recommended" : "no"}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Recovered</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.phraseLockRecovery.recovered ? "yes" : "no"}
+                  </p>
+                </div>
+              </div>
+              <ul className="mt-3 space-y-1 text-xs">
+                {adaptiveRefinement.phraseLockRecovery.reasoning.map((reason, index) => (
+                  <li key={`${reason}-${index}`}>- {reason}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
+          {adaptiveRefinement?.convergenceRecovery ? (
+            <div className="rounded-xl border border-teal-400/25 bg-teal-500/10 p-3 text-sm text-teal-50">
+              <p className="text-xs uppercase tracking-widest">CONVERGENCE RECOVERY</p>
+              <div className="mt-3 grid gap-3 md:grid-cols-4">
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Convergence Delta</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.convergenceRecovery.convergenceDelta >= 0 ? "+" : ""}
+                    {adaptiveRefinement.convergenceRecovery.convergenceDelta.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Synthesis Repair</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.convergenceRecovery.synthesisDelta >= 0 ? "+" : ""}
+                    {adaptiveRefinement.convergenceRecovery.synthesisDelta.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Cadence Recovery</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.convergenceRecovery.cadenceDelta >= 0 ? "+" : ""}
+                    {adaptiveRefinement.convergenceRecovery.cadenceDelta.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Survivability Repair</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.convergenceRecovery.survivabilityDelta >= 0 ? "+" : ""}
+                    {adaptiveRefinement.convergenceRecovery.survivabilityDelta.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Retry Execution</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.convergenceRecovery.retryExecution ? "yes" : "no"}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Recommendation</p>
+                  <p className="mt-1 font-semibold capitalize">
+                    {adaptiveRefinement.convergenceRecovery.finalRecommendation.replace(/_/g, " ")}
+                  </p>
+                </div>
+              </div>
+              <ul className="mt-3 space-y-1 text-xs">
+                {adaptiveRefinement.convergenceRecovery.reasoning.map((reason, index) => (
+                  <li key={`${reason}-${index}`}>- {reason}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
+          {autonomyReadiness ? (
+            <div
+              className={`rounded-xl border p-3 text-sm ${autonomyReadinessStyles(
+                autonomyReadiness.readiness,
+              )}`}
+            >
+              <p className="text-xs uppercase tracking-widest">AUTONOMY READINESS</p>
+              <p className="mt-1 text-xs opacity-80">
+                Bounded autonomy governance — does not enable unrestricted execution.
+              </p>
+              <div className="mt-3 grid gap-3 md:grid-cols-4">
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Readiness State</p>
+                  <p className="mt-1 font-semibold capitalize">
+                    {autonomyReadiness.readiness.replace(/_/g, " ")}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Readiness Score</p>
+                  <p className="mt-1 font-semibold">{autonomyReadiness.readinessScore.toFixed(1)}</p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Convergence Reliability</p>
+                  <p className="mt-1 font-semibold">
+                    {autonomyReadiness.convergenceReliability.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Rollback Reliability</p>
+                  <p className="mt-1 font-semibold">
+                    {autonomyReadiness.rollbackReliability.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Transport Reliability</p>
+                  <p className="mt-1 font-semibold">
+                    {autonomyReadiness.transportReliability.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Phrase Recovery</p>
+                  <p className="mt-1 font-semibold">
+                    {autonomyReadiness.phraseRecoveryReliability.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Orchestration Consistency</p>
+                  <p className="mt-1 font-semibold">
+                    {autonomyReadiness.orchestrationConsistency.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Execution Trust</p>
+                  <p className="mt-1 font-semibold">
+                    {autonomyReadiness.executionTrustScore.toFixed(1)}
+                  </p>
+                </div>
+              </div>
+              {autonomyReadiness.blockers.length > 0 ? (
+                <p className="mt-3 text-xs">
+                  Blockers: {autonomyReadiness.blockers.join(", ").replace(/_/g, " ")}
+                </p>
+              ) : null}
+              {autonomyReadiness.recommendations.length > 0 ? (
+                <ul className="mt-2 space-y-1 text-xs">
+                  {autonomyReadiness.recommendations.map((rec, index) => (
+                    <li key={`${rec}-${index}`}>- {rec}</li>
+                  ))}
+                </ul>
+              ) : null}
             </div>
           ) : null}
 

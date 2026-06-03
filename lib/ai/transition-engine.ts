@@ -27,6 +27,13 @@ import {
   TransitionCompatibilityResult,
 } from "@/lib/ai/transition-patterns";
 import {
+  analyzeAudioIntelligence,
+  applyAudioIntelligenceInfluence,
+  attemptAudioMixRecovery,
+  type AudioIntelligenceResult,
+  type AudioMixRecoveryResult,
+} from "@/lib/ai/audio-intelligence-engine";
+import {
   applyTransitionLearningObservation,
   computeCrowdAdaptationBias,
   computeExecutionStabilityBias,
@@ -264,6 +271,8 @@ export type TransitionEvaluationResult = {
   orchestrationAlignmentHistory: Array<{ timestamp: number; alignment: number; continuityPriority: number; narrativePriority: number }>;
   orchestrationStabilityHistory: Array<{ timestamp: number; stability: number; fatiguePriority: number; synthesisConfidence: number }>;
   orchestrationSynthesisReasoning: string[];
+  audioIntelligence: AudioIntelligenceResult;
+  audioMixRecovery: AudioMixRecoveryResult | null;
 
   transitionDiagnostics: {
     bpmCompatibilityScore: number;
@@ -3612,6 +3621,50 @@ score +=
     reason: reasons[0] ?? "Transition lane is healthy.",
   };
 
+  const audioIntelligence = analyzeAudioIntelligence({
+    currentEnergy: session?.current_energy ?? currentTrack.energy,
+    candidateEnergy: topTransitionCandidate?.candidateTrack.energy ?? topRecommendation?.energy ?? 5,
+    currentBpm: session?.current_bpm ?? currentTrack.bpm,
+    candidateBpm: topTransitionCandidate?.candidateTrack.bpm ?? topRecommendation?.bpm ?? 110,
+    danceability: topTransitionCandidate?.danceability ?? undefined,
+    speechiness: topTransitionCandidate?.speechiness ?? undefined,
+    instrumentalness: topTransitionCandidate?.instrumentalness ?? undefined,
+    valence: topTransitionCandidate?.candidateTrack.valence ?? undefined,
+    currentValence: undefined,
+    dropIntensity: topTransitionCandidate?.candidateTrack.dropIntensity ?? undefined,
+    vocalOverlapRisk: topTransitionCandidate?.vocalOverlapRisk ?? 40,
+    vocalClashScore,
+    phraseCompatibility: topTransitionCandidate?.phraseCompatibility,
+    phraseWindow: phraseTelemetry.phraseTransitionWindow,
+    emotionalContinuity: harmonicEmotion.emotionalContinuity,
+    crowdMomentum: crowdAdaptation.crowdMomentumScore,
+    narrativeEnergyArc: narrativeFlow.narrativeEnergyArc,
+    syncCompatibility: topTransitionCandidate?.syncCompatibility,
+    bassHeavyCurrent: (session?.current_energy ?? 5) >= 7.5,
+    bassHeavyCandidate: (topTransitionCandidate?.candidateTrack.energy ?? 5) >= 7.5,
+  });
+  const audioMixRecovery = attemptAudioMixRecovery({ audio: audioIntelligence });
+  const audioInfluenced = applyAudioIntelligenceInfluence({
+    orchestrationSynthesisConfidence: orchestrationSynthesis.orchestrationSynthesisConfidence,
+    cadenceStability: adaptiveCadence.cadenceStability,
+    phraseTimingRisk: phraseTelemetry.phraseTimingRisk,
+    confidenceScore: confidenceWithLearning,
+    rollbackReadiness: readinessAssessment.rollbackReadiness,
+    audio: audioIntelligence,
+  });
+  if (audioMixRecovery.recovered) {
+    audioInfluenced.orchestrationSynthesisConfidence = Number(
+      clamp(
+        audioInfluenced.orchestrationSynthesisConfidence + audioMixRecovery.mixabilityDelta * 0.35,
+        0,
+        100,
+      ).toFixed(2),
+    );
+    audioInfluenced.phraseTimingRisk = Number(
+      clamp(audioInfluenced.phraseTimingRisk - audioMixRecovery.riskReduction * 0.25, 0, 100).toFixed(2),
+    );
+  }
+
   const result: TransitionEvaluationResult = {
     autonomousReadiness:
       !shouldTransition || transitionCompatibility.riskLevel === "dangerous"
@@ -3622,7 +3675,10 @@ score +=
           ? "needs_review"
           : "ready",
     decision,
-    confidence: { score: confidenceWithLearning, reasons: reasons.length ? reasons : ["Healthy transition profile."] },
+    confidence: {
+      score: audioInfluenced.confidenceScore,
+      reasons: reasons.length ? reasons : ["Healthy transition profile."],
+    },
     riskLevel: riskLevelWithLearning,
     executionPlan,
     telemetry,
@@ -3636,7 +3692,7 @@ score +=
     executionBlockers: readinessAssessment.executionBlockers,
     transportStability: readinessAssessment.transportStability,
     cuePreparationConfidence: readinessAssessment.cuePreparationConfidence,
-    rollbackReadiness: readinessAssessment.rollbackReadiness,
+    rollbackReadiness: audioInfluenced.rollbackReadiness,
     deviceSynchronizationConfidence: readinessAssessment.deviceSynchronizationConfidence,
     executionWindowState: readinessAssessment.executionWindowState,
     estimatedCueLeadTime: readinessAssessment.estimatedCueLeadTime,
@@ -3653,7 +3709,7 @@ score +=
     phraseTransitionWindow: phraseTelemetry.phraseTransitionWindow,
     phraseMomentum: phraseTelemetry.phraseMomentum,
     phraseStability: phraseTelemetry.phraseStability,
-    phraseTimingRisk: phraseTelemetry.phraseTimingRisk,
+    phraseTimingRisk: audioInfluenced.phraseTimingRisk,
     transitionPressure: phraseTelemetry.transitionPressure,
     transitionTimingConfidence: phraseTelemetry.transitionTimingConfidence,
     phraseHistory: phraseTelemetry.phraseHistory,
@@ -3707,7 +3763,7 @@ score +=
     cadenceRecoverySpacing: adaptiveCadence.cadenceRecoverySpacing,
     cadenceEscalationPressure: adaptiveCadence.cadenceEscalationPressure,
     cadenceBreathingRoom: adaptiveCadence.cadenceBreathingRoom,
-    cadenceStability: adaptiveCadence.cadenceStability,
+    cadenceStability: audioInfluenced.cadenceStability,
     cadenceAdaptationConfidence: adaptiveCadence.cadenceAdaptationConfidence,
     cadenceFatigueLoad: adaptiveCadence.cadenceFatigueLoad,
     cadenceNarrativeBalance: adaptiveCadence.cadenceNarrativeBalance,
@@ -3725,12 +3781,17 @@ score +=
     orchestrationContinuityPriority: orchestrationSynthesis.orchestrationContinuityPriority,
     orchestrationFatiguePriority: orchestrationSynthesis.orchestrationFatiguePriority,
     orchestrationNarrativePriority: orchestrationSynthesis.orchestrationNarrativePriority,
-    orchestrationSynthesisConfidence: orchestrationSynthesis.orchestrationSynthesisConfidence,
+    orchestrationSynthesisConfidence: audioInfluenced.orchestrationSynthesisConfidence,
     orchestrationBalanceHistory: orchestrationSynthesis.orchestrationBalanceHistory,
     orchestrationConflictHistory: orchestrationSynthesis.orchestrationConflictHistory,
     orchestrationAlignmentHistory: orchestrationSynthesis.orchestrationAlignmentHistory,
     orchestrationStabilityHistory: orchestrationSynthesis.orchestrationStabilityHistory,
-    orchestrationSynthesisReasoning: orchestrationSynthesis.orchestrationSynthesisReasoning,
+    orchestrationSynthesisReasoning: [
+      ...orchestrationSynthesis.orchestrationSynthesisReasoning,
+      ...audioIntelligence.reasoning.slice(0, 4),
+    ],
+    audioIntelligence,
+    audioMixRecovery,
     currentState: {
       sessionId: session?.id ?? null,
       phase: session?.current_phase ?? null,
