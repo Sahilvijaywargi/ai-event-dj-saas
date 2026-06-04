@@ -96,6 +96,7 @@ export type PlaybackExecutionState = {
   mutationVerificationConfidence?: number;
   queueMutationFreshness?: number;
   rollbackIntegrity?: number;
+  rollbackReadiness?: number;
   transportMutationSafety?: number;
   queueVerificationPassed?: boolean;
   queueVerificationResult?: string;
@@ -225,6 +226,11 @@ export type PlaybackExecutionState = {
     >;
     globalReliability: number;
   };
+  rollbackSurvivability?: import("@/lib/spotify/rollback-survivability-engine").RollbackSurvivabilityResult;
+  transportRecovery?: import("@/lib/spotify/transport-recovery-engine").TransportRecoveryAnalysis;
+  mutationReliability?: number;
+  latestCheckpointId?: string;
+  mutationJournalSize?: number;
   runtimeLearningSignals?: string[];
   runtimeObservabilitySummary?: string[];
   degradationSeverity?: "none" | "low" | "moderate" | "high" | "critical";
@@ -1627,6 +1633,93 @@ function finalizeVerificationStabilization(params: {
     graceReasons: graceSnapshot.grace.reasons,
     gracePenalty,
   };
+}
+
+export async function refreshRollbackSurvivabilityContext(params: {
+  userId: string;
+  evaluation?: import("@/lib/ai/transition-engine").TransitionEvaluationResult | null;
+  transportRuntime?: import("@/lib/transition-orchestration/layer-state").TransportRuntimeState | null;
+  queueUris?: string[];
+  playbackActive?: boolean;
+}) {
+  const session = executionStore.get(params.userId);
+  const { analyzeTransportRecovery } = await import("@/lib/spotify/transport-recovery-engine");
+  const { evaluateRollbackSurvivability } = await import("@/lib/spotify/rollback-survivability-engine");
+  const { computeMutationReliability } = await import("@/lib/spotify/mutation-journal");
+  const { getLatestCheckpoint } = await import("@/lib/spotify/mutation-checkpoint-engine");
+  const { getMutationHistory } = await import("@/lib/spotify/mutation-journal");
+
+  const transportRecovery = analyzeTransportRecovery({
+    userId: params.userId,
+    transportRuntime: params.transportRuntime ?? null,
+    deviceSynchronizationConfidence: params.evaluation?.deviceSynchronizationConfidence,
+    transportStability: params.evaluation?.transportStability,
+    heartbeatContinuity: params.evaluation?.heartbeatContinuity,
+    rollbackIntegrity: session?.state.rollbackIntegrity ?? session?.state.rollbackIntegrityScore,
+    queueContinuityScore: params.transportRuntime?.queueContinuityScore,
+  });
+
+  const survivability = evaluateRollbackSurvivability({
+    userId: params.userId,
+    evaluation: params.evaluation,
+    executionState: session
+      ? {
+          rollbackSnapshot: session.rollbackSnapshot,
+          rollbackIntegrity: session.state.rollbackIntegrity,
+          rollbackIntegrityScore: session.state.rollbackIntegrityScore,
+          rollbackConfidence: session.state.rollbackConfidence,
+          verificationFinalized: session.state.verificationFinalized,
+          verificationSnapshotReliability: session.state.verificationSnapshotReliability,
+          verificationRecoveryConfidence: session.state.verificationRecoveryConfidence,
+          transportIntegrityScore: session.state.transportIntegrityScore,
+          mutationRecoverabilityScore: session.state.mutationRecoverabilityScore,
+        }
+      : null,
+    transportRuntime: params.transportRuntime ?? null,
+    queueUris: params.queueUris,
+    playbackActive: params.playbackActive,
+    transportRecovery,
+  });
+
+  const mutationReliability = computeMutationReliability(params.userId);
+  const latestCheckpointId = getLatestCheckpoint(params.userId)?.checkpointId;
+  const mutationJournalSize = getMutationHistory(params.userId).length;
+
+  if (session) {
+    session.state = {
+      ...session.state,
+      rollbackSurvivability: survivability,
+      transportRecovery,
+      mutationReliability,
+      latestCheckpointId,
+      mutationJournalSize,
+      rollbackReadiness: survivability.rollbackReadiness,
+      rollbackIntegrity: Number(
+        clamp(
+          Math.max(session.state.rollbackIntegrity ?? 0, survivability.replayConfidence),
+          0,
+          100,
+        ).toFixed(2),
+      ),
+      rollbackConfidence: Number(
+        clamp(
+          Math.max(session.state.rollbackConfidence ?? 0, survivability.replayConfidence * 0.95),
+          0,
+          100,
+        ).toFixed(2),
+      ),
+      mutationRecoverabilityScore: Number(
+        clamp(
+          Math.max(session.state.mutationRecoverabilityScore ?? 0, survivability.survivabilityScore),
+          0,
+          100,
+        ).toFixed(2),
+      ),
+    };
+    executionStore.set(params.userId, session);
+  }
+
+  return { survivability, transportRecovery, mutationReliability, latestCheckpointId, mutationJournalSize };
 }
 
 export function getPlaybackExecutionState(userId: string): PlaybackExecutionState {

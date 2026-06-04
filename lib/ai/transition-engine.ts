@@ -7,7 +7,19 @@ import { getLiveSessionState, updateDjSession } from "@/lib/dj-session/engine";
 import { RecommendationTelemetryItem } from "@/lib/spotify/telemetry-types";
 import { getPlaybackOrchestrationState, queueAiRecommendedTrack } from "@/lib/spotify/device-orchestrator";
 import { executeGuardedPlaybackCommand } from "@/lib/spotify/playback-guarded";
-import { startSpotifyPlayback } from "@/lib/spotify/playback-service";
+import { refreshRollbackSurvivabilityContext } from "@/lib/spotify/playback-execution-engine";
+import { startSpotifyPlayback, getSpotifyQueueState } from "@/lib/spotify/playback-service";
+import type { RollbackSurvivabilityResult } from "@/lib/spotify/rollback-survivability-engine";
+import type { TransportRecoveryAnalysis } from "@/lib/spotify/transport-recovery-engine";
+import {
+  analyzeStructuralCompatibility,
+  applyStructuralIntelligenceInfluence,
+  inferCandidateEntrySection,
+  inferSongStructurePosition,
+  mapPhraseSectionToSongSection,
+  resolveLiveStructuralAnalysis,
+  type StructuralCompatibilityAnalysis,
+} from "@/lib/ai/song-structure";
 import { serveRecommendationDiagnostics } from "@/lib/spotify/diagnostics-serving";
 import {
   evaluateTelemetryFreshness,
@@ -273,6 +285,12 @@ export type TransitionEvaluationResult = {
   orchestrationSynthesisReasoning: string[];
   audioIntelligence: AudioIntelligenceResult;
   audioMixRecovery: AudioMixRecoveryResult | null;
+  rollbackSurvivability?: RollbackSurvivabilityResult;
+  transportRecovery?: TransportRecoveryAnalysis;
+  mutationReliability?: number;
+  latestCheckpointId?: string;
+  mutationJournalSize?: number;
+  structuralCompatibility?: StructuralCompatibilityAnalysis;
 
   transitionDiagnostics: {
     bpmCompatibilityScore: number;
@@ -365,6 +383,18 @@ export type TransitionEvaluationResult = {
     compatibilityReasoning: string[];
 
     transitionReasoning: string[];
+
+    structuralCompatibility: number;
+
+    exitQuality: number;
+
+    entryQuality: number;
+
+    structuralNarrativeContinuity: number;
+
+    detectedExitSection: string;
+
+    detectedEntrySection: string;
   };
 };
 
@@ -2795,6 +2825,39 @@ export function scoreTransitionCandidate(params: {
     currentTrack: params.currentTrack,
     candidateTrack: params.candidateTrack,
   });
+  const outroBars = params.currentTrack.outroLengthBars ?? 16;
+  const mixOutBar = params.currentTrack.estimatedMixOutPoint ?? Math.round(outroBars * 0.75);
+  const exitPhrasePosition = clamp((mixOutBar / Math.max(outroBars, 1)) * 100, 0, 100);
+  const exitPosition = inferSongStructurePosition({
+    phrasePosition: exitPhrasePosition,
+    phraseLengthBars: outroBars,
+    energy: params.currentTrack.energy,
+    dropIntensity: params.currentTrack.dropIntensity ?? undefined,
+    preferPhraseWindow: false,
+  });
+  const candidatePhraseSection = mapPhraseSectionToSongSection(
+    derivePhraseSection({
+      phase: null,
+      energy: params.candidateTrack.energy,
+      dropIntensity: params.candidateTrack.dropIntensity ?? undefined,
+      breakdownPresence: params.candidateTrack.breakdownPresence ?? false,
+      instrumentalness: params.candidateTrack.instrumentalness ?? undefined,
+      speechiness: params.candidateTrack.speechiness ?? undefined,
+    }),
+  );
+  const entryResolved = inferCandidateEntrySection({
+    phraseCompatibility: phrase.phraseCompatibility,
+    introLengthBars: params.candidateTrack.introLengthBars ?? undefined,
+    dropIntensity: params.candidateTrack.dropIntensity ?? undefined,
+    energy: params.candidateTrack.energy,
+    instrumentalSections: params.candidateTrack.instrumentalSections ?? undefined,
+    candidatePhraseSection,
+  });
+  const structural = analyzeStructuralCompatibility({
+    exitPosition,
+    entrySection: entryResolved.entrySection,
+    phraseAlignmentScore: phrase.phraseAlignmentScore,
+  });
   const strategyDecision = determineExecutionStrategy({
     harmonicCompatibility: harmonic.camelotCompatibility,
     phraseCompatibility: phrase.phraseCompatibility,
@@ -2843,6 +2906,7 @@ export function scoreTransitionCandidate(params: {
     memoryPatterns: params.memoryPatterns,
   });
 
+  const structuralConfidenceBoost = (structural.structuralCompatibility - 62) * 0.1;
   const confidence =
     bpmScore * 0.15 +
     enrichedEnergyScore * 0.15 +
@@ -2850,7 +2914,8 @@ export function scoreTransitionCandidate(params: {
     harmonic.harmonicCompatibilityScore * 0.20 +
     phrase.phraseAlignmentScore * 0.20 +
     beatSync.beatSyncScore * 0.20 +
-    memoryBias.confidenceBias;
+    memoryBias.confidenceBias +
+    structuralConfidenceBoost;
   const harmonicRiskDelta =
     harmonic.harmonicRisk === "incompatible_harmonic_jump"
       ? 0.45
@@ -2906,6 +2971,7 @@ export function scoreTransitionCandidate(params: {
     danceability: Number(candidateDanceability.toFixed(4)),
     riskLevel,
     memoryBias,
+    structuralCompatibility: structural,
   };
 }
 export async function evaluateTransitionEngine(params: {
@@ -3480,6 +3546,40 @@ score +=
       executionWindowState: readinessAssessment.executionWindowState,
     },
   });
+
+  const structuralPhraseLengthBars = phraseTelemetry.currentPhraseLength >= 24 ? 16 : 8;
+  const liveCurrentPhraseSection = derivePhraseSection({
+    phase: session?.current_phase ?? null,
+    energy: session?.current_energy ?? 5,
+    breakdownPresence: false,
+  });
+  const candidateEntrySection = mapPhraseSectionToSongSection(nextTrackProfile.phraseSection);
+
+  const structuralAnalysis = resolveLiveStructuralAnalysis({
+    userId: params.userId,
+    trackName: playback.playbackState?.track?.name ?? topRecommendation?.name ?? null,
+    playbackProgressMs: playback.playbackState?.progressMs ?? null,
+    phraseTransitionWindow: phraseTelemetry.phraseTransitionWindow,
+    derivedCurrentPhraseSection: liveCurrentPhraseSection,
+    phrasePosition: phraseTelemetry.currentPhrasePosition,
+    phraseLengthBars: structuralPhraseLengthBars,
+    sessionEnergy: session?.current_energy ?? undefined,
+    roomEnergy: audioState.latest?.energy_level ?? audioState.drift.shortTermAverage,
+    energyTrend: audioState.drift.driftScore,
+    tensionTrend: harmonicEmotion.harmonicTension,
+    dropIntensity: topTransitionCandidate?.candidateTrack.dropIntensity ?? undefined,
+    executionWindowState: readinessAssessment.executionWindowState,
+    phraseCompatibility: topTransitionCandidate?.phraseCompatibility,
+    introLengthBars: topTransitionCandidate?.candidateTrack.introLengthBars ?? undefined,
+    candidateEnergy: topTransitionCandidate?.candidateTrack.energy ?? topRecommendation?.energy,
+    instrumentalSections: topTransitionCandidate?.candidateTrack.instrumentalSections ?? undefined,
+    candidatePhraseSection: candidateEntrySection,
+    phraseAlignmentScore:
+      topTransitionCandidate?.phraseAlignmentScore ?? phraseTelemetry.transitionTimingConfidence,
+  });
+  reasons.push(...structuralAnalysis.reasoning.slice(0, 3));
+  reasons.push(...structuralAnalysis.inference.inferenceReason.slice(0, 2));
+
   const learningProfile = createDefaultTransitionLearningProfile();
   const learningObservation = applyTransitionLearningObservation({
     profile: learningProfile,
@@ -3665,6 +3765,37 @@ score +=
     );
   }
 
+  const structuralInfluence = applyStructuralIntelligenceInfluence({
+    structural: structuralAnalysis,
+    confidenceScore: audioInfluenced.confidenceScore,
+    phraseTimingRisk: audioInfluenced.phraseTimingRisk,
+    narrativeContinuity: narrativeFlow.narrativeContinuity,
+    synthesisConfidence: audioInfluenced.orchestrationSynthesisConfidence,
+  });
+  audioInfluenced.confidenceScore = structuralInfluence.confidenceScore;
+  audioInfluenced.phraseTimingRisk = structuralInfluence.phraseTimingRisk;
+  audioInfluenced.orchestrationSynthesisConfidence = structuralInfluence.synthesisConfidence;
+  const narrativeContinuityWithStructure = structuralInfluence.narrativeContinuity;
+
+  const queueState = await getSpotifyQueueState(params.userId);
+  const queueUris =
+    queueState?.queue
+      ?.map((track) => track.uri)
+      .filter((uri): uri is string => typeof uri === "string" && uri.length > 0) ?? [];
+
+  const survivabilityBundle = await refreshRollbackSurvivabilityContext({
+    userId: params.userId,
+    evaluation: {
+      transportStability: readinessAssessment.transportStability,
+      deviceSynchronizationConfidence: readinessAssessment.deviceSynchronizationConfidence,
+      heartbeatContinuity: readinessAssessment.heartbeatContinuity,
+      rollbackReadiness: audioInfluenced.rollbackReadiness,
+      rollbackSafetyMargin: readinessAssessment.rollbackSafetyMargin,
+    } as TransitionEvaluationResult,
+    queueUris,
+    playbackActive: Boolean(playback.playbackState?.isPlaying),
+  });
+
   const result: TransitionEvaluationResult = {
     autonomousReadiness:
       !shouldTransition || transitionCompatibility.riskLevel === "dangerous"
@@ -3692,7 +3823,12 @@ score +=
     executionBlockers: readinessAssessment.executionBlockers,
     transportStability: readinessAssessment.transportStability,
     cuePreparationConfidence: readinessAssessment.cuePreparationConfidence,
-    rollbackReadiness: audioInfluenced.rollbackReadiness,
+    rollbackReadiness: survivabilityBundle.survivability.rollbackReadiness,
+    rollbackSurvivability: survivabilityBundle.survivability,
+    transportRecovery: survivabilityBundle.transportRecovery,
+    mutationReliability: survivabilityBundle.mutationReliability,
+    latestCheckpointId: survivabilityBundle.latestCheckpointId,
+    mutationJournalSize: survivabilityBundle.mutationJournalSize,
     deviceSynchronizationConfidence: readinessAssessment.deviceSynchronizationConfidence,
     executionWindowState: readinessAssessment.executionWindowState,
     estimatedCueLeadTime: readinessAssessment.estimatedCueLeadTime,
@@ -3747,7 +3883,7 @@ score +=
     narrativeTension: narrativeFlow.narrativeTension,
     narrativeRecoveryPressure: narrativeFlow.narrativeRecoveryPressure,
     narrativeProgressionConfidence: narrativeFlow.narrativeProgressionConfidence,
-    narrativeContinuity: narrativeFlow.narrativeContinuity,
+    narrativeContinuity: narrativeContinuityWithStructure,
     narrativeEnergyArc: narrativeFlow.narrativeEnergyArc,
     narrativeResolutionConfidence: narrativeFlow.narrativeResolutionConfidence,
     narrativeFatigueRisk: narrativeFlow.narrativeFatigueRisk,
@@ -3792,6 +3928,7 @@ score +=
     ],
     audioIntelligence,
     audioMixRecovery,
+    structuralCompatibility: structuralAnalysis,
     currentState: {
       sessionId: session?.id ?? null,
       phase: session?.current_phase ?? null,
@@ -3919,6 +4056,18 @@ score +=
 
       compatibilityReasoning: transitionCompatibility.reasoning,
 
+      structuralCompatibility: structuralAnalysis.structuralCompatibility,
+
+      exitQuality: structuralAnalysis.exitQuality,
+
+      entryQuality: structuralAnalysis.entryQuality,
+
+      structuralNarrativeContinuity: structuralAnalysis.narrativeContinuity,
+
+      detectedExitSection: structuralAnalysis.exitSection,
+
+      detectedEntrySection: structuralAnalysis.entrySection,
+
       transitionReasoning: [
         bpmCompatibilityScore >= 85
           ? "Strong BPM alignment."
@@ -3989,6 +4138,7 @@ score +=
         readinessAssessment.deviceSynchronizationConfidence < 50
           ? "Device synchronization unstable."
           : "Playback transport synchronization remains within bounded stability.",
+        ...structuralAnalysis.reasoning,
         ...phraseTelemetry.phraseTimingReasoning,
         ...harmonicEmotion.harmonicEmotionReasoning,
         ...crowdAdaptation.crowdAdaptationReasoning,
@@ -4052,6 +4202,28 @@ export async function executeTransitionEnginePlan(params: {
       message: "No target track available for transition execution.",
       execution: null,
     };
+  }
+
+  if (params.mode === "execute") {
+    const survivability = evaluation.rollbackSurvivability;
+    const transportRecoveryConfidence =
+      evaluation.transportRecovery?.confidence ??
+      survivability?.transportRecoveryConfidence ??
+      0;
+    if (
+      !survivability ||
+      survivability.rollbackReadiness <= 55 ||
+      survivability.survivabilityScore <= 60 ||
+      transportRecoveryConfidence <= 60
+    ) {
+      console.log("[ExecutePlan] rollback survivability gate blocked execution");
+      return {
+        ok: false,
+        message:
+          "Rollback survivability insufficient for supervised execution (readiness, survivability score, or transport recovery confidence below gate).",
+        execution: null,
+      };
+    }
   }
 
   console.log("[ExecutePlan] before queue executeGuardedPlaybackCommand");

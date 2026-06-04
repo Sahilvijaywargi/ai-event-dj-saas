@@ -86,7 +86,8 @@ export function simulateCandidateExecution(params: {
     projectedExecutionStability * 0.42 +
       params.evaluation.transitionDiagnostics.compatibilityScore * 0.28 +
       params.candidate.confidence * 0.2 +
-      params.evaluation.transitionDiagnostics.phraseAlignmentScore * 0.1,
+      params.evaluation.transitionDiagnostics.phraseAlignmentScore * 0.1 +
+      (params.evaluation.transitionDiagnostics.structuralCompatibility ?? 50) * 0.08,
     0,
     100,
   );

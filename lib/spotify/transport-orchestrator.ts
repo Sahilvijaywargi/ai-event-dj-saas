@@ -2,12 +2,16 @@ import "server-only";
 
 import { TransitionEvaluationResult } from "@/lib/ai/transition-engine";
 import { getPlaybackOrchestrationState, queueAiRecommendedTrack } from "@/lib/spotify/device-orchestrator";
+import { getSpotifyQueueState } from "@/lib/spotify/playback-service";
 import { executeGuardedPlaybackCommand } from "@/lib/spotify/playback-guarded";
 import {
   getPlaybackExecutionState,
   propagateTransportFreshnessSynchronization,
+  refreshRollbackSurvivabilityContext,
   runSupervisedExecutionValidation,
 } from "@/lib/spotify/playback-execution-engine";
+import { createMutationCheckpoint, restoreMutationCheckpoint } from "@/lib/spotify/mutation-checkpoint-engine";
+import { recordMutation } from "@/lib/spotify/mutation-journal";
 import type { AdaptiveOrchestrationCandidate } from "@/lib/ai/adaptive-orchestration";
 import type { OrchestrationConvergenceMetrics } from "@/lib/ai/orchestration-refinement-types";
 import { coordinateTelemetryFreshness } from "@/lib/spotify/telemetry-freshness-coordinator";
@@ -245,6 +249,46 @@ export async function queuePreparedTransitionTrack(params: {
     } satisfies TransportMutationResult;
   }
 
+  const playback = await getPlaybackOrchestrationState(params.userId);
+  const preQueueState = await getSpotifyQueueState(params.userId);
+  const beforeQueue =
+    preQueueState?.queue
+      ?.map((t) => t.uri)
+      .filter((uri): uri is string => typeof uri === "string" && uri.length > 0) ?? [];
+
+  createMutationCheckpoint({
+    userId: params.userId,
+    queueUris: beforeQueue,
+    playbackPositionMs: playback.playbackState?.progressMs ?? 0,
+    activeTrackUri: playback.playbackState?.track?.uri ?? null,
+    transportIntegrity: params.evaluation.transportStability,
+    rollbackConfidence: params.evaluation.rollbackReadiness,
+  });
+
+  recordMutation({
+    userId: params.userId,
+    action: "prepare_queue_start",
+    beforeQueueState: beforeQueue,
+    afterQueueState: beforeQueue,
+    success: true,
+    rollbackAvailable: true,
+  });
+
+  const preSurvivability = await refreshRollbackSurvivabilityContext({
+    userId: params.userId,
+    evaluation: params.evaluation,
+    queueUris: beforeQueue,
+    playbackActive: Boolean(playback.playbackState?.isPlaying),
+  });
+
+  if (!preSurvivability.survivability.survivable) {
+    for (const blocker of preSurvivability.survivability.blockers) {
+      if (!blockers.includes(blocker)) blockers.push(blocker);
+    }
+    warnings.push("rollback_survivability_below_execution_threshold");
+    explainability.push(...preSurvivability.survivability.recommendations.slice(0, 3));
+  }
+
   const guardedResult = await executeGuardedPlaybackCommand({
     userId: params.userId,
     commandType: "queue",
@@ -264,6 +308,23 @@ export async function queuePreparedTransitionTrack(params: {
     console.log("[TransportOrchestrator] queuePreparedTransitionTrack:guarded-failure", {
       message: guardedResult.message,
       blockers,
+    });
+    const afterFailQueue = beforeQueue;
+    recordMutation({
+      userId: params.userId,
+      action: "prepare_queue_failure",
+      beforeQueueState: beforeQueue,
+      afterQueueState: afterFailQueue,
+      success: false,
+      rollbackAvailable: true,
+      recoveryUsed: restoreMutationCheckpoint({ userId: params.userId }).restored
+        ? "checkpoint_restore"
+        : undefined,
+    });
+    await refreshRollbackSurvivabilityContext({
+      userId: params.userId,
+      evaluation: params.evaluation,
+      queueUris: afterFailQueue,
     });
     return {
       success: false,
@@ -291,6 +352,38 @@ export async function queuePreparedTransitionTrack(params: {
   refreshPlaybackHeartbeat(params.userId);
   refreshDeviceHeartbeat(params.userId);
   refreshQueueHeartbeat(params.userId);
+
+  const postQueueState = await getSpotifyQueueState(params.userId);
+  const afterQueue =
+    postQueueState?.queue
+      ?.map((t) => t.uri)
+      .filter((uri): uri is string => typeof uri === "string" && uri.length > 0) ?? [];
+
+  createMutationCheckpoint({
+    userId: params.userId,
+    queueUris: afterQueue,
+    playbackPositionMs: playback.playbackState?.progressMs ?? 0,
+    activeTrackUri: playback.playbackState?.track?.uri ?? null,
+    transportIntegrity: params.evaluation.transportStability,
+    rollbackConfidence: Math.max(params.evaluation.rollbackReadiness, preSurvivability.survivability.rollbackReadiness),
+  });
+
+  recordMutation({
+    userId: params.userId,
+    action: "prepare_queue_success",
+    beforeQueueState: beforeQueue,
+    afterQueueState: afterQueue,
+    success: true,
+    rollbackAvailable: true,
+    executionOutcome: "queue_prepared",
+  });
+
+  const postSurvivability = await refreshRollbackSurvivabilityContext({
+    userId: params.userId,
+    evaluation: params.evaluation,
+    queueUris: afterQueue,
+    playbackActive: Boolean(playback.playbackState?.isPlaying),
+  });
 
   const postMutationExecution = getPlaybackExecutionState(params.userId);
   const validationBundle = await runSupervisedExecutionValidation({
@@ -322,6 +415,11 @@ export async function queuePreparedTransitionTrack(params: {
       learningSignals: validationBundle.learningSignals,
       runtimeTrustCalibration: validationBundle.runtimeTrustCalibration,
       autonomyReadiness: validationBundle.autonomyReadiness,
+      rollbackSurvivability: postSurvivability.survivability,
+      transportRecovery: postSurvivability.transportRecovery,
+      latestCheckpointId: postSurvivability.latestCheckpointId,
+      mutationJournalSize: postSurvivability.mutationJournalSize,
+      mutationReliability: postSurvivability.mutationReliability,
     },
   } satisfies TransportMutationResult;
 }
@@ -449,6 +547,38 @@ export async function prepareTransportMutation(params: {
     } satisfies TransportMutationResult;
   }
 
+  const windowPlayback = await getPlaybackOrchestrationState(params.userId);
+  const windowQueueState = await getSpotifyQueueState(params.userId);
+  const windowQueueUris =
+    windowQueueState?.queue
+      ?.map((t) => t.uri)
+      .filter((uri): uri is string => typeof uri === "string" && uri.length > 0) ?? [];
+
+  createMutationCheckpoint({
+    userId: params.userId,
+    queueUris: windowQueueUris,
+    playbackPositionMs: windowPlayback.playbackState?.progressMs ?? 0,
+    activeTrackUri: windowPlayback.playbackState?.track?.uri ?? null,
+    transportIntegrity: params.evaluation.transportStability,
+    rollbackConfidence: params.evaluation.rollbackReadiness,
+  });
+
+  recordMutation({
+    userId: params.userId,
+    action: "prepare_window",
+    beforeQueueState: windowQueueUris,
+    afterQueueState: windowQueueUris,
+    success: true,
+    rollbackAvailable: true,
+  });
+
+  const windowSurvivability = await refreshRollbackSurvivabilityContext({
+    userId: params.userId,
+    evaluation: params.evaluation,
+    queueUris: windowQueueUris,
+    playbackActive: Boolean(windowPlayback.playbackState?.isPlaying),
+  });
+
   console.log("[TransportOrchestrator] prepareTransportMutation:prepared-window", {
     safety: executionWindow.estimatedMutationSafety,
   });
@@ -470,6 +600,11 @@ export async function prepareTransportMutation(params: {
       queueFreshnessScore: executionWindow.queueFreshnessScore,
       estimatedMutationSafety: executionWindow.estimatedMutationSafety,
       executionWindowViability: executionWindow.executionWindowViability,
+      rollbackSurvivability: windowSurvivability.survivability,
+      transportRecovery: windowSurvivability.transportRecovery,
+      latestCheckpointId: windowSurvivability.latestCheckpointId,
+      mutationJournalSize: windowSurvivability.mutationJournalSize,
+      mutationReliability: windowSurvivability.mutationReliability,
     },
   } satisfies TransportMutationResult;
 }

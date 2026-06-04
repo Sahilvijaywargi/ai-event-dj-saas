@@ -71,11 +71,17 @@ export function evaluateOrchestrationConvergence(params: {
     100,
   );
 
+  const structuralBoost =
+    (params.evaluation.structuralCompatibility?.structuralCompatibility ??
+      params.evaluation.transitionDiagnostics.structuralCompatibility ??
+      0) * 0.06;
+
   const synthesisConfidence = clamp(
     params.evaluation.orchestrationSynthesisConfidence +
       params.evaluation.orchestrationStability * 0.12 +
       (params.phraseRecovery?.recoveryGain ?? 0) * 0.28 +
-      (params.phraseRecovery?.cadenceRecovery ?? 0) * 0.12 -
+      (params.phraseRecovery?.cadenceRecovery ?? 0) * 0.12 +
+      structuralBoost -
       (params.candidate.predictedRisk > 70 ? 8 : 0),
     0,
     100,

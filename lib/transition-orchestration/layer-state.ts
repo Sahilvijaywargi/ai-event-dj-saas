@@ -49,6 +49,13 @@ export type ExecutionRuntimeState = {
   rollbackAllowed?: boolean;
   rollbackIntegrityScore?: number;
   rollbackConfidence?: number;
+  rollbackReadiness?: number;
+  survivabilityScore?: number;
+  mutationReliability?: number;
+  latestCheckpointId?: string;
+  mutationJournalSize?: number;
+  transportRecoveryStrategy?: string;
+  transportRecoveryConfidence?: number;
   mutationHealthScore?: number;
   degradationSeverity?: string;
   graceState?: string;
