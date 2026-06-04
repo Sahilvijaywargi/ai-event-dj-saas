@@ -55,6 +55,24 @@ export async function fetchRuntimeJson<T extends Record<string, unknown>>(
     }
 
     const data = (await response.json()) as T;
+    if (
+      !options?.allowNonOk &&
+      !response.ok &&
+      response.status >= 500 &&
+      data.retryable === true &&
+      attempt < retries
+    ) {
+      const retryAfterHeader = Number(response.headers.get("retry-after") ?? "0");
+      const delayMs = retryAfterHeader > 0 ? retryAfterHeader * 1000 : retryDelayMs;
+      console.warn("[SYNC FETCH] retryable auth/service error", {
+        url,
+        status: response.status,
+        authFailureKind: data.authFailureKind,
+        delayMs,
+      });
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      continue;
+    }
     if (!options?.allowNonOk && !response.ok) {
       throw new Error(`[${url}] ${extractErrorMessage(data, response.status)}`);
     }

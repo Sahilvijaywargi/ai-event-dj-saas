@@ -8,6 +8,29 @@ import {
 
 export type ClassificationMode = "audio_driven" | "mixed" | "position_driven";
 
+export type SectionArbiterSource =
+  | "agreement"
+  | "audio_override"
+  | "window_guidance"
+  | "blended";
+
+export interface SectionClassificationResult {
+  section: SongSection;
+  sectionConfidence: number;
+  arbiterSource: SectionArbiterSource;
+  phraseWindowPrediction: SongSection;
+  audioEvidencePrediction: SongSection;
+  phraseWindow: string;
+  agreementScore: number;
+  disagreementReason: string | null;
+  audioConfidence: number;
+  windowGuidanceConfidence: number;
+  inferenceReason: string[];
+}
+
+const AGREEMENT_THRESHOLD = 85;
+const AUDIO_OVERRIDE_THRESHOLD = 68;
+
 export type SectionTransitionTrigger =
   | "position_threshold"
   | "phrase_window"
@@ -317,17 +340,34 @@ export function computePositionDrivenConfidence(params: {
   audioEvidencePrediction: SongSection;
   finalSection: SongSection;
   timeline: SectionTransitionEvent[];
+  arbiterSource?: SectionArbiterSource;
+  agreementScore?: number;
 }): number {
+  const agreementScore = params.agreementScore ?? 50;
+
+  if (params.arbiterSource === "audio_override") {
+    return round(clamp(100 - agreementScore * 0.4, 6, 32));
+  }
+
+  if (
+    params.finalSection === params.audioEvidencePrediction &&
+    params.finalSection !== params.phraseWindowPrediction
+  ) {
+    return round(clamp(18 + agreementScore * 0.22, 12, 42));
+  }
+
   let confidence = 0;
 
-  if (params.phraseWindowPrediction === params.finalSection) confidence += 32;
-  if (params.phraseWindowPrediction !== params.audioEvidencePrediction) confidence += 18;
-  if (params.finalSection !== params.audioEvidencePrediction) confidence += 16;
+  if (params.phraseWindowPrediction === params.finalSection) confidence += 36;
+  if (params.finalSection === params.audioEvidencePrediction) confidence += 18;
+  if (params.agreementScore != null && params.agreementScore >= 85) confidence += 22;
+  else if (params.agreementScore != null && params.agreementScore < 72) confidence -= 10;
 
   const nearThreshold = POSITION_THRESHOLDS.some(
     (threshold) => Math.abs(params.phrasePosition - threshold) <= 3,
   );
-  if (nearThreshold) confidence += 14;
+  if (nearThreshold && params.arbiterSource === "window_guidance") confidence += 8;
+  else if (nearThreshold) confidence -= 6;
 
   const canonicalProgression: SongSection[] = ["intro", "build", "verse", "chorus", "outro"];
   const recentSections = params.timeline
@@ -341,22 +381,38 @@ export function computePositionDrivenConfidence(params: {
     const idx = canonicalProgression.indexOf(section);
     return prevIdx >= 0 && idx >= 0 && idx >= prevIdx;
   });
-  if (followsCanonical && recentSections.length >= 2) confidence += 12;
+  if (followsCanonical && recentSections.length >= 2) {
+    confidence += 10;
+  }
 
   const thresholdTransitions = params.timeline.filter(
     (event) => event.trigger === "position_threshold",
   ).length;
   const totalTransitions = params.timeline.filter((event) => event.trigger !== "initial").length;
-  if (totalTransitions > 0) {
-    confidence += (thresholdTransitions / totalTransitions) * 28;
+  if (totalTransitions > 0 && params.arbiterSource === "window_guidance") {
+    confidence += (thresholdTransitions / totalTransitions) * 20;
+  }
+
+  if (params.arbiterSource === "agreement") {
+    confidence += 14;
   }
 
   return round(confidence);
 }
 
-export function resolveClassificationMode(positionDrivenConfidence: number): ClassificationMode {
-  if (positionDrivenConfidence >= 72) return "position_driven";
-  if (positionDrivenConfidence <= 38) return "audio_driven";
+export function resolveClassificationMode(params: {
+  positionDrivenConfidence: number;
+  arbiterSource?: SectionArbiterSource;
+}): ClassificationMode {
+  if (params.arbiterSource === "audio_override") return "audio_driven";
+  if (params.arbiterSource === "window_guidance" && params.positionDrivenConfidence >= 58) {
+    return "position_driven";
+  }
+  if (params.arbiterSource === "agreement" && params.positionDrivenConfidence >= 72) {
+    return "position_driven";
+  }
+  if (params.positionDrivenConfidence >= 72) return "position_driven";
+  if (params.positionDrivenConfidence <= 38) return "audio_driven";
   return "mixed";
 }
 
@@ -375,6 +431,8 @@ export function buildStructuralDetectionValidation(params: {
   executionWindowState?: "stable_window" | "narrow_window" | "unstable_window" | "expired_window";
   inferenceReason: string[];
   classificationInputs: Record<string, string | number | boolean | null>;
+  arbiterSource?: SectionArbiterSource;
+  agreementScore?: number;
 }): StructuralDetectionValidation {
   const phrasePosition = params.phrasePosition ?? 50;
   const positionModel = predictSectionFromPhrasePosition({
@@ -422,9 +480,14 @@ export function buildStructuralDetectionValidation(params: {
     audioEvidencePrediction: audioModel.section,
     finalSection: params.detectedSection,
     timeline,
+    arbiterSource: params.arbiterSource,
+    agreementScore: params.agreementScore ?? phraseAudioAgreement.agreementScore,
   });
 
-  const classificationMode = resolveClassificationMode(positionDrivenConfidence);
+  const classificationMode = resolveClassificationMode({
+    positionDrivenConfidence,
+    arbiterSource: params.arbiterSource,
+  });
 
   const debug: StructuralInferenceDebug = {
     playbackProgressMs: params.playbackProgressMs,
@@ -440,7 +503,7 @@ export function buildStructuralDetectionValidation(params: {
       ...positionModel.reasoning,
       ...audioModel.reasoning,
       phraseAudioAgreement.disagreementReason ?? "Phrase window and audio evidence agree.",
-      `Classification mode: ${classificationMode} (position-driven confidence ${positionDrivenConfidence.toFixed(0)}).`,
+      `Classification mode: ${classificationMode} (position-driven confidence ${positionDrivenConfidence.toFixed(0)}${params.arbiterSource ? `, arbiter ${params.arbiterSource}` : ""}).`,
     ],
     classificationInputs: {
       ...params.classificationInputs,
@@ -449,6 +512,7 @@ export function buildStructuralDetectionValidation(params: {
       phraseWindowFromPosition: positionModel.phraseWindow,
       positionThresholds: POSITION_THRESHOLDS.join(","),
       agreementScore: phraseAudioAgreement.agreementScore,
+      arbiterSource: params.arbiterSource ?? null,
     },
   };
 
@@ -458,5 +522,182 @@ export function buildStructuralDetectionValidation(params: {
     positionDrivenConfidence,
     classificationMode,
     phraseAudioAgreement,
+  };
+}
+
+export function computeAudioEvidenceConfidence(params: {
+  derivedPhraseSection?: string | null;
+  speechiness?: number | null;
+  instrumentalness?: number | null;
+  dropIntensity?: number | null;
+  agreementScore: number;
+}): number {
+  let confidence = 42;
+
+  if (params.derivedPhraseSection) confidence += 28;
+  if (params.speechiness != null && (params.speechiness >= 0.32 || params.speechiness <= 0.12)) {
+    confidence += 12;
+  }
+  if (params.instrumentalness != null && params.instrumentalness >= 0.55) {
+    confidence += 10;
+  }
+  if (params.dropIntensity != null && params.dropIntensity >= 7) {
+    confidence += 8;
+  }
+  if (params.agreementScore >= AGREEMENT_THRESHOLD) {
+    confidence += 14;
+  }
+
+  return round(confidence);
+}
+
+export function computeWindowGuidanceConfidence(params: {
+  phrasePosition: number;
+  phraseTransitionWindow?: string | null;
+  executionWindowState?: "stable_window" | "narrow_window" | "unstable_window" | "expired_window";
+}): number {
+  let confidence = 52;
+
+  const nearThreshold = POSITION_THRESHOLDS.some(
+    (threshold) => Math.abs(params.phrasePosition - threshold) <= 3,
+  );
+  if (nearThreshold) confidence -= 22;
+  if (params.phraseTransitionWindow === "unstable") confidence -= 18;
+  if (params.phraseTransitionWindow === "phrase_boundary") confidence += 8;
+  if (params.phrasePosition >= 76) confidence += 14;
+
+  if (params.executionWindowState === "stable_window" && params.phrasePosition >= 76) {
+    confidence += 6;
+  }
+
+  return round(confidence);
+}
+
+export function resolveSectionClassification(params: {
+  phrasePosition?: number;
+  phraseTransitionWindow?: string | null;
+  derivedCurrentPhraseSection?:
+    | "intro"
+    | "verse"
+    | "buildup"
+    | "drop"
+    | "breakdown"
+    | "bridge"
+    | "outro"
+    | null;
+  sessionEnergy?: number;
+  roomEnergy?: number;
+  energyTrend?: number;
+  tensionTrend?: number;
+  dropIntensity?: number;
+  speechiness?: number | null;
+  instrumentalness?: number | null;
+  executionWindowState?: "stable_window" | "narrow_window" | "unstable_window" | "expired_window";
+}): SectionClassificationResult {
+  const phrasePosition = clamp(params.phrasePosition ?? 50, 0, 100);
+
+  const positionModel = predictSectionFromPhrasePosition({
+    phrasePosition,
+    executionWindowState: params.executionWindowState,
+  });
+
+  const audioModel = predictSectionFromAudioEvidence({
+    derivedPhraseSection: params.derivedCurrentPhraseSection ?? undefined,
+    sessionEnergy: params.sessionEnergy,
+    roomEnergy: params.roomEnergy,
+    energyTrend: params.energyTrend,
+    tensionTrend: params.tensionTrend,
+    dropIntensity: params.dropIntensity,
+    phrasePosition,
+  });
+
+  const phraseAudioAgreement = evaluatePhraseAudioAgreement({
+    phraseWindowPrediction: positionModel.section,
+    audioEvidencePrediction: audioModel.section,
+  });
+
+  const windowGuidanceConfidence = computeWindowGuidanceConfidence({
+    phrasePosition,
+    phraseTransitionWindow: params.phraseTransitionWindow ?? positionModel.phraseWindow,
+    executionWindowState: params.executionWindowState,
+  });
+
+  const audioConfidence = computeAudioEvidenceConfidence({
+    derivedPhraseSection: params.derivedCurrentPhraseSection,
+    speechiness: params.speechiness,
+    instrumentalness: params.instrumentalness,
+    dropIntensity: params.dropIntensity,
+    agreementScore: phraseAudioAgreement.agreementScore,
+  });
+
+  const inferenceReason: string[] = [];
+  let section: SongSection;
+  let arbiterSource: SectionArbiterSource;
+  let sectionConfidence: number;
+
+  if (phraseAudioAgreement.agreementScore >= AGREEMENT_THRESHOLD) {
+    section = positionModel.section;
+    arbiterSource = "agreement";
+    sectionConfidence = round((audioConfidence + windowGuidanceConfidence) / 2 + 10);
+    inferenceReason.push(
+      `Phrase window guidance and audio evidence agree on "${section}" (agreement ${phraseAudioAgreement.agreementScore}).`,
+    );
+  } else if (
+    audioConfidence >= AUDIO_OVERRIDE_THRESHOLD &&
+    audioConfidence >= windowGuidanceConfidence + 6
+  ) {
+    section = audioModel.section;
+    arbiterSource = "audio_override";
+    sectionConfidence = audioConfidence;
+    inferenceReason.push(
+      `Audio evidence overrides phrase window guidance (audio ${audioConfidence.toFixed(0)} vs window ${windowGuidanceConfidence.toFixed(0)}).`,
+    );
+    inferenceReason.push(audioModel.reasoning[0] ?? "Audio profile selected section.");
+  } else if (
+    windowGuidanceConfidence >= audioConfidence + 14 &&
+    positionModel.section !== audioModel.section
+  ) {
+    section = positionModel.section;
+    arbiterSource = "window_guidance";
+    sectionConfidence = windowGuidanceConfidence;
+    inferenceReason.push(
+      `Phrase window guidance retained as structural hint (${windowGuidanceConfidence.toFixed(0)} confidence).`,
+    );
+    inferenceReason.push(positionModel.reasoning[0] ?? "Position band mapped to section.");
+  } else {
+    const audioWeight = audioConfidence / Math.max(audioConfidence + windowGuidanceConfidence, 1);
+    if (audioWeight >= 0.52) {
+      section = audioModel.section;
+      inferenceReason.push(
+        `Blended arbitration favors audio (${(audioWeight * 100).toFixed(0)}% weight → "${section}").`,
+      );
+    } else {
+      section = positionModel.section;
+      inferenceReason.push(
+        `Blended arbitration favors phrase window (${((1 - audioWeight) * 100).toFixed(0)}% weight → "${section}").`,
+      );
+    }
+    arbiterSource = "blended";
+    sectionConfidence = round(
+      audioWeight * audioConfidence + (1 - audioWeight) * windowGuidanceConfidence,
+    );
+  }
+
+  if (phraseAudioAgreement.disagreementReason) {
+    inferenceReason.push(phraseAudioAgreement.disagreementReason);
+  }
+
+  return {
+    section,
+    sectionConfidence,
+    arbiterSource,
+    phraseWindowPrediction: positionModel.section,
+    audioEvidencePrediction: audioModel.section,
+    phraseWindow: positionModel.phraseWindow,
+    agreementScore: phraseAudioAgreement.agreementScore,
+    disagreementReason: phraseAudioAgreement.disagreementReason,
+    audioConfidence,
+    windowGuidanceConfidence,
+    inferenceReason,
   };
 }

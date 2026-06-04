@@ -8,6 +8,7 @@ import {
   getCheckpoints,
   getLatestCheckpoint,
 } from "@/lib/spotify/mutation-checkpoint-engine";
+import type { RollbackSnapshotSource } from "@/lib/spotify/rollback-snapshot-bootstrap";
 import { analyzeTransportRecovery, type TransportRecoveryAnalysis } from "@/lib/spotify/transport-recovery-engine";
 
 function clamp(value: number, min: number, max: number) {
@@ -33,6 +34,8 @@ export interface RollbackSurvivabilityResult {
   blockers: string[];
   recommendations: string[];
   survivable: boolean;
+  snapshotSource?: RollbackSnapshotSource;
+  snapshotComplete?: boolean;
 }
 
 export function evaluateRollbackSurvivability(params: {
@@ -53,6 +56,8 @@ export function evaluateRollbackSurvivability(params: {
   queueUris?: string[];
   playbackActive?: boolean;
   transportRecovery?: TransportRecoveryAnalysis | null;
+  snapshotSource?: RollbackSnapshotSource;
+  snapshotComplete?: boolean;
 }): RollbackSurvivabilityResult {
   console.log("[ROLLBACK] survivability evaluation started", { userId: params.userId });
 
@@ -191,5 +196,7 @@ export function evaluateRollbackSurvivability(params: {
     blockers,
     recommendations,
     survivable,
+    snapshotSource: params.snapshotSource,
+    snapshotComplete: params.snapshotComplete ?? snapshotComplete,
   };
 }

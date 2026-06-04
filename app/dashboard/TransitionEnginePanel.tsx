@@ -2166,8 +2166,8 @@ export function TransitionEnginePanel({ queueRecommendations }: TransitionEngine
 
                   {evaluation.structuralCompatibility.inference.debug.inferenceReason.length ? (
                     <ul className="list-inside list-disc space-y-1 rounded-lg border border-white/10 bg-black/35 p-3 opacity-90">
-                      {evaluation.structuralCompatibility.inference.debug.inferenceReason.slice(0, 8).map((line) => (
-                        <li key={line}>{line}</li>
+                      {evaluation.structuralCompatibility.inference.debug.inferenceReason.slice(0, 8).map((line, index) => (
+                        <li key={`inference-reason-${index}-${line}`}>{line}</li>
                       ))}
                     </ul>
                   ) : null}

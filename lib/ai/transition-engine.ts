@@ -3548,11 +3548,7 @@ score +=
   });
 
   const structuralPhraseLengthBars = phraseTelemetry.currentPhraseLength >= 24 ? 16 : 8;
-  const liveCurrentPhraseSection = derivePhraseSection({
-    phase: session?.current_phase ?? null,
-    energy: session?.current_energy ?? 5,
-    breakdownPresence: false,
-  });
+  const liveCurrentPhraseSection = currentTrackProfile.phraseSection;
   const candidateEntrySection = mapPhraseSectionToSongSection(nextTrackProfile.phraseSection);
 
   const structuralAnalysis = resolveLiveStructuralAnalysis({
@@ -3561,6 +3557,8 @@ score +=
     playbackProgressMs: playback.playbackState?.progressMs ?? null,
     phraseTransitionWindow: phraseTelemetry.phraseTransitionWindow,
     derivedCurrentPhraseSection: liveCurrentPhraseSection,
+    speechiness: topTransitionCandidate?.speechiness ?? null,
+    instrumentalness: topTransitionCandidate?.instrumentalness ?? null,
     phrasePosition: phraseTelemetry.currentPhrasePosition,
     phraseLengthBars: structuralPhraseLengthBars,
     sessionEnergy: session?.current_energy ?? undefined,
@@ -3794,6 +3792,8 @@ score +=
     } as TransitionEvaluationResult,
     queueUris,
     playbackActive: Boolean(playback.playbackState?.isPlaying),
+    queueState,
+    playbackOrchestration: playback,
   });
 
   const result: TransitionEvaluationResult = {

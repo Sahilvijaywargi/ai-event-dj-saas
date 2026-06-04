@@ -12,6 +12,7 @@ import {
   type StructuralInferenceDebug,
 } from "@/lib/ai/structural-detection-diagnostics";
 import { summarizePhraseCalibration } from "@/lib/ai/phrase-calibration";
+import { resolveSectionClassification } from "@/lib/ai/structural-detection-diagnostics";
 
 export type SongSection =
   | "intro"
@@ -144,6 +145,53 @@ export function mapPhraseSectionToSongSection(
   return section;
 }
 
+export function applyEnergySectionOverrides(params: {
+  currentSection: SongSection;
+  sectionConfidence: number;
+  phrasePosition: number;
+  energy?: number;
+  dropIntensity?: number;
+  inferenceReason: string[];
+}): {
+  currentSection: SongSection;
+  sectionConfidence: number;
+  inferenceReason: string[];
+} {
+  let currentSection = params.currentSection;
+  let sectionConfidence = params.sectionConfidence;
+  const inferenceReason = [...params.inferenceReason];
+  const phrasePosition = clamp(params.phrasePosition, 0, 100);
+
+  if (
+    params.dropIntensity != null &&
+    params.dropIntensity >= 7.5 &&
+    phrasePosition >= 35 &&
+    phrasePosition <= 75
+  ) {
+    currentSection = "drop";
+    sectionConfidence = Math.max(sectionConfidence, 68);
+    inferenceReason.push("Drop intensity and mid-phrase progress indicate drop section.");
+  } else if ((params.energy ?? 5) >= 8.2 && ["verse", "build", "pre_chorus"].includes(currentSection)) {
+    currentSection = "chorus";
+    sectionConfidence = Math.max(sectionConfidence, 64);
+    inferenceReason.push("High room energy elevates section to chorus.");
+  } else if ((params.energy ?? 5) <= 4.5 && phrasePosition >= 70) {
+    currentSection = "outro";
+    sectionConfidence = Math.max(sectionConfidence, 66);
+    inferenceReason.push("Low energy late in phrase suggests outro exit.");
+  } else if ((params.energy ?? 5) <= 5 && phrasePosition <= 18) {
+    currentSection = "intro";
+    sectionConfidence = Math.max(sectionConfidence, 66);
+    inferenceReason.push("Low energy early in phrase suggests intro section.");
+  }
+
+  return {
+    currentSection,
+    sectionConfidence: round(sectionConfidence),
+    inferenceReason,
+  };
+}
+
 export function inferSongStructurePosition(params: {
   phraseTransitionWindow?: "intro" | "buildup" | "phrase_boundary" | "chorus" | "outro" | "unstable";
   phraseSection?: "intro" | "verse" | "buildup" | "drop" | "breakdown" | "bridge" | "outro";
@@ -191,32 +239,21 @@ export function inferSongStructurePosition(params: {
     inferenceReason.push("No phrase window or section telemetry; applying energy/progress heuristics.");
   }
 
-  if (params.dropIntensity != null && params.dropIntensity >= 7.5 && phrasePosition >= 35 && phrasePosition <= 75) {
-    currentSection = "drop";
-    sectionConfidence = Math.max(sectionConfidence, 68);
-    inferenceReason.push("Drop intensity and mid-phrase progress indicate drop section.");
-  } else if ((params.energy ?? 5) >= 8.2 && ["verse", "build", "pre_chorus"].includes(currentSection)) {
-    currentSection = "chorus";
-    sectionConfidence = Math.max(sectionConfidence, 64);
-    inferenceReason.push("High room energy elevates section to chorus.");
-  } else if ((params.energy ?? 5) <= 4.5 && phrasePosition >= 70) {
-    currentSection = "outro";
-    sectionConfidence = Math.max(sectionConfidence, 66);
-    inferenceReason.push("Low energy late in phrase suggests outro exit.");
-  } else if ((params.energy ?? 5) <= 5 && phrasePosition <= 18) {
-    currentSection = "intro";
-    sectionConfidence = Math.max(sectionConfidence, 66);
-    inferenceReason.push("Low energy early in phrase suggests intro section.");
-  }
-
-  const nextSection = NEXT_SECTION_HINT[currentSection];
+  const overridden = applyEnergySectionOverrides({
+    currentSection,
+    sectionConfidence,
+    phrasePosition,
+    energy: params.energy,
+    dropIntensity: params.dropIntensity,
+    inferenceReason,
+  });
 
   return {
-    currentSection,
-    nextSection,
+    currentSection: overridden.currentSection,
+    nextSection: NEXT_SECTION_HINT[overridden.currentSection],
     remainingBarsInSection,
-    sectionConfidence: round(sectionConfidence),
-    inferenceReason,
+    sectionConfidence: overridden.sectionConfidence,
+    inferenceReason: overridden.inferenceReason,
   };
 }
 
@@ -351,6 +388,8 @@ export function resolveLiveStructuralAnalysis(params: {
   energyTrend?: number;
   tensionTrend?: number;
   dropIntensity?: number;
+  speechiness?: number | null;
+  instrumentalness?: number | null;
   executionWindowState?: "stable_window" | "narrow_window" | "unstable_window" | "expired_window";
   phraseCompatibility?: string;
   introLengthBars?: number;
@@ -359,15 +398,41 @@ export function resolveLiveStructuralAnalysis(params: {
   candidatePhraseSection?: SongSection;
   phraseAlignmentScore: number;
 }): StructuralCompatibilityAnalysis {
-  const exitPosition = inferSongStructurePosition({
-    phraseTransitionWindow: params.phraseTransitionWindow,
-    phraseSection: params.derivedCurrentPhraseSection,
+  const phraseLengthBars = params.phraseLengthBars ?? 16;
+  const phrasePosition = clamp(params.phrasePosition ?? 50, 0, 100);
+  const positionBars = (phrasePosition / 100) * phraseLengthBars;
+  const remainingBarsInSection = Math.max(0, Math.ceil(phraseLengthBars - positionBars));
+
+  const classification = resolveSectionClassification({
     phrasePosition: params.phrasePosition,
-    phraseLengthBars: params.phraseLengthBars,
-    energy: params.sessionEnergy,
+    phraseTransitionWindow: params.phraseTransitionWindow ?? null,
+    derivedCurrentPhraseSection: params.derivedCurrentPhraseSection ?? null,
+    sessionEnergy: params.sessionEnergy,
+    roomEnergy: params.roomEnergy,
+    energyTrend: params.energyTrend,
+    tensionTrend: params.tensionTrend,
     dropIntensity: params.dropIntensity,
-    preferPhraseWindow: true,
+    speechiness: params.speechiness,
+    instrumentalness: params.instrumentalness,
+    executionWindowState: params.executionWindowState,
   });
+
+  const energyAdjusted = applyEnergySectionOverrides({
+    currentSection: classification.section,
+    sectionConfidence: classification.sectionConfidence,
+    phrasePosition,
+    energy: params.sessionEnergy ?? params.roomEnergy,
+    dropIntensity: params.dropIntensity,
+    inferenceReason: [...classification.inferenceReason],
+  });
+
+  const exitPosition: SongStructurePosition & { inferenceReason: string[] } = {
+    currentSection: energyAdjusted.currentSection,
+    nextSection: NEXT_SECTION_HINT[energyAdjusted.currentSection],
+    remainingBarsInSection,
+    sectionConfidence: energyAdjusted.sectionConfidence,
+    inferenceReason: energyAdjusted.inferenceReason,
+  };
 
   const entryResolved = inferCandidateEntrySection({
     phraseCompatibility: params.phraseCompatibility,
@@ -394,7 +459,7 @@ export function resolveLiveStructuralAnalysis(params: {
     ...exitPosition.inferenceReason,
     ...entryResolved.inferenceReason,
     inferenceSource === "live_telemetry"
-      ? "Structural detection used live phrase telemetry."
+      ? "Structural detection used live phrase telemetry with section arbiter (PASS 18.2)."
       : inferenceSource === "mixed_fallback"
         ? "Structural detection mixed phrase section hints with limited window telemetry."
         : "Structural detection fell back to static candidate metadata (no live window).",
@@ -414,6 +479,8 @@ export function resolveLiveStructuralAnalysis(params: {
     dropIntensity: params.dropIntensity,
     executionWindowState: params.executionWindowState,
     inferenceReason,
+    arbiterSource: classification.arbiterSource,
+    agreementScore: classification.agreementScore,
     classificationInputs: {
       trackName: params.trackName ?? null,
       phraseLengthBars: params.phraseLengthBars ?? null,
@@ -421,7 +488,10 @@ export function resolveLiveStructuralAnalysis(params: {
       candidatePhraseCompatibility: params.phraseCompatibility ?? null,
       candidateEnergy: params.candidateEnergy ?? null,
       dropIntensity: params.dropIntensity ?? null,
-      preferPhraseWindow: true,
+      preferPhraseWindow: false,
+      arbiterSource: classification.arbiterSource,
+      audioConfidence: classification.audioConfidence,
+      windowGuidanceConfidence: classification.windowGuidanceConfidence,
       executionWindowState: params.executionWindowState ?? null,
     },
   });
@@ -443,7 +513,12 @@ export function resolveLiveStructuralAnalysis(params: {
     sectionTransitionTimeline: validation.sectionTransitionTimeline,
     positionDrivenConfidence: validation.positionDrivenConfidence,
     classificationMode: validation.classificationMode,
-    phraseAudioAgreement: validation.phraseAudioAgreement,
+    phraseAudioAgreement: {
+      phraseWindowPrediction: classification.phraseWindowPrediction,
+      audioEvidencePrediction: classification.audioEvidencePrediction,
+      agreementScore: classification.agreementScore,
+      disagreementReason: classification.disagreementReason,
+    },
     calibrationSummary: {
       totalObservations: calibrationSummary.totalObservations,
       mismatchRate: calibrationSummary.mismatchRate,

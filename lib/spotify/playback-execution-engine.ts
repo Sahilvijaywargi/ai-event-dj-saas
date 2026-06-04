@@ -4,6 +4,13 @@ import { TransitionEvaluationResult } from "@/lib/ai/transition-engine";
 import { getPlaybackOrchestrationState, queueAiRecommendedTrack } from "@/lib/spotify/device-orchestrator";
 import { executeGuardedPlaybackCommand } from "@/lib/spotify/playback-guarded";
 import { getSpotifyQueueState } from "@/lib/spotify/playback-service";
+import {
+  buildObservationalRollbackSnapshot,
+  deriveBootstrapReplayTelemetry,
+  fetchLiveRollbackSnapshotInputs,
+  isRollbackSnapshotComplete,
+  type RollbackSnapshotSource,
+} from "@/lib/spotify/rollback-snapshot-bootstrap";
 import { refreshRecommendationFreshnessTimestamps } from "@/lib/spotify/recommendation-serving";
 import {
   ensureSpotifyTransportAuth,
@@ -268,6 +275,7 @@ type QueueRollbackSnapshot = {
   snapshotHash?: string;
   snapshotCreatedAt?: number;
   ownerUserId?: string;
+  source?: "execution" | "bootstrap";
 };
 
 type ExecutionSession = {
@@ -1641,6 +1649,8 @@ export async function refreshRollbackSurvivabilityContext(params: {
   transportRuntime?: import("@/lib/transition-orchestration/layer-state").TransportRuntimeState | null;
   queueUris?: string[];
   playbackActive?: boolean;
+  queueState?: Awaited<ReturnType<typeof getSpotifyQueueState>> | null;
+  playbackOrchestration?: Awaited<ReturnType<typeof getPlaybackOrchestrationState>> | null;
 }) {
   const session = executionStore.get(params.userId);
   const { analyzeTransportRecovery } = await import("@/lib/spotify/transport-recovery-engine");
@@ -1649,37 +1659,99 @@ export async function refreshRollbackSurvivabilityContext(params: {
   const { getLatestCheckpoint } = await import("@/lib/spotify/mutation-checkpoint-engine");
   const { getMutationHistory } = await import("@/lib/spotify/mutation-journal");
 
+  let snapshotSource: RollbackSnapshotSource = "missing";
+  let executionState: {
+    rollbackSnapshot: QueueRollbackSnapshot | null;
+    rollbackIntegrity?: number;
+    rollbackIntegrityScore?: number;
+    rollbackConfidence?: number;
+    verificationFinalized?: boolean;
+    verificationSnapshotReliability?: number;
+    verificationRecoveryConfidence?: number;
+    transportIntegrityScore?: number;
+    mutationRecoverabilityScore?: number;
+  } | null = null;
+
+  if (session?.rollbackSnapshot) {
+    snapshotSource = "execution";
+    executionState = {
+      rollbackSnapshot: session.rollbackSnapshot,
+      rollbackIntegrity: session.state.rollbackIntegrity,
+      rollbackIntegrityScore: session.state.rollbackIntegrityScore,
+      rollbackConfidence: session.state.rollbackConfidence,
+      verificationFinalized: session.state.verificationFinalized,
+      verificationSnapshotReliability: session.state.verificationSnapshotReliability,
+      verificationRecoveryConfidence: session.state.verificationRecoveryConfidence,
+      transportIntegrityScore: session.state.transportIntegrityScore,
+      mutationRecoverabilityScore: session.state.mutationRecoverabilityScore,
+    };
+  } else {
+    let queueState = params.queueState ?? null;
+    let playback = params.playbackOrchestration ?? null;
+    if (!queueState || !playback) {
+      const live = await fetchLiveRollbackSnapshotInputs(params.userId);
+      queueState = queueState ?? live.queueState;
+      playback = playback ?? live.playback;
+    }
+
+    const bootstrapSnapshot = buildObservationalRollbackSnapshot({
+      userId: params.userId,
+      queueState,
+      playback,
+    });
+    const snapshotComplete = isRollbackSnapshotComplete(bootstrapSnapshot);
+    snapshotSource = snapshotComplete ? "bootstrap" : "missing";
+
+    if (bootstrapSnapshot && snapshotComplete) {
+      const replayTelemetry = deriveBootstrapReplayTelemetry({
+        evaluation: params.evaluation,
+        playbackActive: params.playbackActive,
+        queueUris: params.queueUris,
+        snapshotComplete: true,
+      });
+      executionState = {
+        rollbackSnapshot: bootstrapSnapshot,
+        ...replayTelemetry,
+      };
+      console.log("[ROLLBACK] evaluate-mode bootstrap snapshot active", {
+        userId: params.userId,
+        snapshotHash: bootstrapSnapshot.snapshotHash,
+      });
+    }
+  }
+
+  const snapshotComplete = isRollbackSnapshotComplete(executionState?.rollbackSnapshot ?? null);
+
   const transportRecovery = analyzeTransportRecovery({
     userId: params.userId,
     transportRuntime: params.transportRuntime ?? null,
     deviceSynchronizationConfidence: params.evaluation?.deviceSynchronizationConfidence,
     transportStability: params.evaluation?.transportStability,
     heartbeatContinuity: params.evaluation?.heartbeatContinuity,
-    rollbackIntegrity: session?.state.rollbackIntegrity ?? session?.state.rollbackIntegrityScore,
+    rollbackIntegrity:
+      executionState?.rollbackIntegrity ??
+      session?.state.rollbackIntegrity ??
+      session?.state.rollbackIntegrityScore,
     queueContinuityScore: params.transportRuntime?.queueContinuityScore,
   });
 
   const survivability = evaluateRollbackSurvivability({
     userId: params.userId,
     evaluation: params.evaluation,
-    executionState: session
-      ? {
-          rollbackSnapshot: session.rollbackSnapshot,
-          rollbackIntegrity: session.state.rollbackIntegrity,
-          rollbackIntegrityScore: session.state.rollbackIntegrityScore,
-          rollbackConfidence: session.state.rollbackConfidence,
-          verificationFinalized: session.state.verificationFinalized,
-          verificationSnapshotReliability: session.state.verificationSnapshotReliability,
-          verificationRecoveryConfidence: session.state.verificationRecoveryConfidence,
-          transportIntegrityScore: session.state.transportIntegrityScore,
-          mutationRecoverabilityScore: session.state.mutationRecoverabilityScore,
-        }
-      : null,
+    executionState,
     transportRuntime: params.transportRuntime ?? null,
     queueUris: params.queueUris,
     playbackActive: params.playbackActive,
     transportRecovery,
+    snapshotSource,
+    snapshotComplete,
   });
+
+  if (snapshotSource === "bootstrap") {
+    survivability.recommendations.unshift(
+      "Evaluate-mode observational snapshot used (read-only; execution prepare snapshot not present).",
+    );
+  }
 
   const mutationReliability = computeMutationReliability(params.userId);
   const latestCheckpointId = getLatestCheckpoint(params.userId)?.checkpointId;
@@ -2575,6 +2647,7 @@ export async function prepareTrackQueue(params: {
     }),
     snapshotCreatedAt: Date.now(),
     ownerUserId: params.userId,
+    source: "execution",
   };
   console.log("[SYNC] rollback snapshot created", {
     snapshotHash: rollbackSnapshot.snapshotHash,

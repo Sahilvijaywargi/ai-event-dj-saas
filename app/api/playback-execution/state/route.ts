@@ -1,17 +1,20 @@
 import { NextResponse } from "next/server";
-import { apiJsonError, apiUnauthorized } from "@/lib/api/json-route-response";
+import { apiJsonError } from "@/lib/api/json-route-response";
+import { resolveApiRouteAuth } from "@/lib/api/resolve-route-auth";
 import { getPlaybackExecutionState } from "@/lib/spotify/playback-execution-engine";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export async function GET() {
   try {
-    const supabase = await createSupabaseServerClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) return apiUnauthorized();
+    const auth = await resolveApiRouteAuth();
+    if (!auth.ok) {
+      console.warn("[API AUTH] playback-execution/state", {
+        kind: auth.kind,
+        diagnostics: auth.diagnostics,
+      });
+      return auth.response;
+    }
 
-    const state = getPlaybackExecutionState(user.id);
+    const state = getPlaybackExecutionState(auth.user.id);
     return NextResponse.json(
       {
         ok: true,

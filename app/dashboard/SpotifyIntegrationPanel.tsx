@@ -84,15 +84,33 @@ export function SpotifyIntegrationPanel({
   }
 
   async function syncPlaylists() {
+    console.log("[SpotifySync] SYNC CLICKED");
+    console.log("[SpotifySync] syncPlaylists entry", {
+      connected,
+      syncStatus,
+      playlistCount: playlists.length,
+    });
+
     setSyncStatus("syncing");
     setErrorMessage(null);
 
+    const apiUrl = "/api/spotify/playlists";
+
     try {
-      const response = await fetch("/api/spotify/playlists");
+      console.log("[SpotifySync] API request URL", apiUrl);
+      const response = await fetch(apiUrl);
+      console.log("[SpotifySync] API response status", response.status);
 
       const data = await response.json();
+      console.log("[SpotifySync] API response body summary", {
+        connected: data.connected,
+        playlistCount: Array.isArray(data.playlists) ? data.playlists.length : null,
+        fromCache: data.fromCache,
+        message: data.message,
+      });
 
       if (!response.ok) {
+        console.log("[SpotifySync] early return reason: response not ok", data.message);
         throw new Error(data.message ?? "Failed to sync playlists.");
       }
 
@@ -101,7 +119,12 @@ export function SpotifyIntegrationPanel({
       setPlaylists(data.playlists ?? []);
 
       setSyncStatus("synced");
+      console.log("[SpotifySync] sync success", {
+        connected: Boolean(data.connected),
+        playlistCount: Array.isArray(data.playlists) ? data.playlists.length : 0,
+      });
     } catch (error) {
+      console.log("[SpotifySync] caught exception", error);
       setSyncStatus("error");
 
       setErrorMessage(
@@ -203,7 +226,10 @@ export function SpotifyIntegrationPanel({
           ) : (
             <>
               <button
-                onClick={syncPlaylists}
+                onClick={() => {
+                  console.log("[SpotifySync] SYNC CLICKED (button handler)");
+                  void syncPlaylists();
+                }}
                 disabled={syncStatus === "syncing"}
                 className="rounded-full border border-white/20 px-4 py-2 text-xs font-semibold uppercase tracking-wider hover:bg-white/10 disabled:opacity-60"
               >

@@ -420,16 +420,65 @@ export async function forceRefreshSpotifyAccessToken(userId: string) {
   return auth.accessToken;
 }
 
+/** Spotify playlist item count ref (Feb 2026 `items`; legacy `tracks`). */
+type SpotifyPlaylistCountRef = {
+  href?: string;
+  total?: number;
+};
+
+/** Partial playlist object from GET /me/playlists. */
+type SpotifyPlaylistListItem = {
+  id?: string | null;
+  name?: string | null;
+  items?: SpotifyPlaylistCountRef | null;
+  tracks?: SpotifyPlaylistCountRef | null;
+};
+
+type SpotifyUserPlaylistsResponse = {
+  items?: Array<SpotifyPlaylistListItem | null> | null;
+};
+
+function resolvePlaylistTracksCount(item: SpotifyPlaylistListItem): number {
+  const fromItems = item.items?.total;
+  if (typeof fromItems === "number" && Number.isFinite(fromItems)) {
+    return Math.max(0, Math.floor(fromItems));
+  }
+  const fromTracks = item.tracks?.total;
+  if (typeof fromTracks === "number" && Number.isFinite(fromTracks)) {
+    return Math.max(0, Math.floor(fromTracks));
+  }
+  return 0;
+}
+
+function mapSpotifyPlaylistItem(
+  item: SpotifyPlaylistListItem | null | undefined,
+): SpotifyPlaylist | null {
+  if (!item || typeof item.id !== "string" || !item.id.trim()) return null;
+  if (typeof item.name !== "string" || !item.name.trim()) return null;
+  try {
+    return {
+      id: item.id,
+      name: item.name,
+      tracksCount: resolvePlaylistTracksCount(item),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function getSpotifyPlaylists(userId: string): Promise<SpotifyPlaylist[]> {
   const accessToken = await getValidSpotifyAccessToken(userId);
-  const data = await spotifyFetch<{
-    items: Array<{ id: string; name: string; tracks: { total: number } }>;
-  }>(accessToken, "/me/playlists?limit=20");
-  return data.items.map((item) => ({
-    id: item.id,
-    name: item.name,
-    tracksCount: item.tracks.total,
-  }));
+  const data = await spotifyFetch<SpotifyUserPlaylistsResponse>(
+    accessToken,
+    "/me/playlists?limit=20",
+  );
+
+  const playlists: SpotifyPlaylist[] = [];
+  for (const item of data.items ?? []) {
+    const mapped = mapSpotifyPlaylistItem(item);
+    if (mapped) playlists.push(mapped);
+  }
+  return playlists;
 }
 
 export async function getSpotifyLikedSongs(userId: string) {
