@@ -86,6 +86,18 @@ export function selectBestPhraseRecovery(directives: PhraseRecoveryDirective[]):
   );
 }
 
+export function selectPhraseRecoveryByAdvisory(
+  directives: PhraseRecoveryDirective[],
+  preferPhraseHold: boolean,
+): PhraseRecoveryDirective | null {
+  if (!directives.length) return null;
+  if (preferPhraseHold) {
+    const holdPhrase = directives.find((directive) => directive.strategy === "hold_phrase");
+    if (holdPhrase) return holdPhrase;
+  }
+  return selectBestPhraseRecovery(directives);
+}
+
 export function applyPhraseRecoveryToCandidate(
   candidate: AdaptiveOrchestrationCandidate,
   directive: PhraseRecoveryDirective,

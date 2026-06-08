@@ -2,6 +2,7 @@ import type { TransitionEvaluationResult, ExecutionStrategy } from "@/lib/ai/tra
 import type { TransitionSimulationResult } from "@/lib/ai/transition-simulation";
 import { evaluateOrchestrationConvergence } from "@/lib/ai/orchestration-convergence";
 import {
+  applyStabilityAdvisoryToDirectives,
   buildAdaptationContext,
   mapEvaluationStrategyToAdaptive,
   mapEvaluationWindowToAdaptive,
@@ -9,6 +10,10 @@ import {
   type AdaptiveOrchestrationStrategy,
   type AdaptiveExecutionWindow,
 } from "@/lib/ai/adaptive-orchestration";
+import {
+  analyzeConvergenceNarrativeStability,
+  resolveRecoverySeedFromAdvisory,
+} from "@/lib/ai/convergence-narrative-stability";
 import {
   finalizeCandidates,
   generateOrchestrationCandidates,
@@ -19,7 +24,7 @@ import {
 import {
   applyPhraseRecoveryToCandidate,
   generatePhraseRecoveryCandidates,
-  selectBestPhraseRecovery,
+  selectPhraseRecoveryByAdvisory,
 } from "@/lib/ai/phrase-recovery-engine";
 import { analyzePhraseWindow } from "@/lib/ai/phrase-window-engine";
 import { recoverGlobalConvergence } from "@/lib/ai/convergence-recovery-engine";
@@ -210,12 +215,22 @@ export function refineOrchestrationAfterSimulation(params: {
           transportStability: params.transportRuntime?.transportStability ?? params.evaluation.transportStability,
         })
       : null;
-  const { instability, directives } = buildAdaptationContext({
+  const { instability, directives: baseDirectives } = buildAdaptationContext({
     evaluation: params.evaluation,
     simulation: params.simulation,
     transportRuntime: params.transportRuntime,
     executionRuntime: params.executionRuntime,
   });
+
+  const preCandidateStability = analyzeConvergenceNarrativeStability({
+    evaluation: params.evaluation,
+    simulation: params.simulation,
+    instability,
+  });
+  const directives = applyStabilityAdvisoryToDirectives(
+    baseDirectives,
+    preCandidateStability.stabilityAdvisory,
+  );
 
   const previousStrategy = mapEvaluationStrategyToAdaptive(params.evaluation.executionStrategy);
   const baselineStability = computeAverage(params.simulation.timeline.projectedExecutionStability);
@@ -266,7 +281,10 @@ export function refineOrchestrationAfterSimulation(params: {
   });
 
   const phraseDirectives = generatePhraseRecoveryCandidates({ evaluation: params.evaluation });
-  let phraseRecovery = selectBestPhraseRecovery(phraseDirectives);
+  let phraseRecovery = selectPhraseRecoveryByAdvisory(
+    phraseDirectives,
+    preCandidateStability.stabilityAdvisory.preferPhraseHold,
+  );
 
   let firstPass = evaluateCandidatesWithConvergence({
     candidates,
@@ -303,12 +321,21 @@ export function refineOrchestrationAfterSimulation(params: {
   );
   let globalConvergenceState: OrchestrationRefinementResult["globalConvergenceState"] = "stable";
 
+  const advisoryRecoverySeedId = resolveRecoverySeedFromAdvisory({
+    rankedCandidates,
+    selectedCandidate,
+    recoveryChainPriority: preCandidateStability.recoveryChainPriority,
+  });
   const recoverySeed =
+    (advisoryRecoverySeedId
+      ? rankedCandidates.find((c) => c.id === advisoryRecoverySeedId)
+      : null) ??
     rankedCandidates.find(
       (c) =>
         !c.rejected &&
         (c.strategy === "recovery_blend" || c.strategy === "smooth_blend"),
-    ) ?? selectedCandidate;
+    ) ??
+    selectedCandidate;
 
   const baselineMetrics =
     firstPass.metricsById.get(recoverySeed.id) ??
@@ -489,6 +516,13 @@ export function refineOrchestrationAfterSimulation(params: {
     convergenceByCandidateId: firstPass.metricsById,
   });
 
+  const convergenceNarrativeStability = analyzeConvergenceNarrativeStability({
+    evaluation: params.evaluation,
+    simulation: params.simulation,
+    instability,
+    convergenceMetrics,
+  });
+
   return {
     instabilityDetected: instability.refinementRequired,
     instabilitySignals: instability.signals,
@@ -519,6 +553,7 @@ export function refineOrchestrationAfterSimulation(params: {
     globalConvergenceState,
     candidateConvergence,
     fastCutFailureDiagnostics,
+    convergenceNarrativeStability,
     runtimeTrustCalibration,
     autonomyReadiness,
     phraseWindowAnalysis,

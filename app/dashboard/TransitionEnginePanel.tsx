@@ -1780,6 +1780,100 @@ export function TransitionEnginePanel({ queueRecommendations }: TransitionEngine
             </div>
           ) : null}
 
+          {adaptiveRefinement?.convergenceNarrativeStability ? (
+            <div className="rounded-xl border border-indigo-300/30 bg-indigo-500/8 p-3 text-sm text-indigo-50">
+              <p className="text-xs uppercase tracking-widest text-indigo-100/85">
+                CONVERGENCE &amp; NARRATIVE STABILITY
+              </p>
+              <p className="mt-1 text-xs text-white/65">
+                Advisory forecast only — canonical compatibility, convergence, and confidence scores are unchanged.
+              </p>
+              <p className="mt-2 text-xs text-white/80">{adaptiveRefinement.convergenceNarrativeStability.summary}</p>
+              <div className="mt-3 grid gap-3 md:grid-cols-4">
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest text-white/60">Forecast Severity</p>
+                  <p className="mt-1 font-semibold capitalize">
+                    {adaptiveRefinement.convergenceNarrativeStability.forecastSeverity}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest text-white/60">Divergence Probability</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.convergenceNarrativeStability.divergenceProbability.toFixed(1)}%
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest text-white/60">Phrase Lock Confidence</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.convergenceNarrativeStability.phraseLockConfidence.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest text-white/60">Phrase Lock State</p>
+                  <p className="mt-1 font-semibold capitalize">
+                    {adaptiveRefinement.convergenceNarrativeStability.phraseLockState}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest text-white/60">Narrative Trajectory</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.convergenceNarrativeStability.advisoryNarrativeTrajectory.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest text-white/60">Cadence Trajectory</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.convergenceNarrativeStability.advisoryCadenceTrajectory.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest text-white/60">Convergence Trajectory</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.convergenceNarrativeStability.advisoryConvergenceTrajectory.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest text-white/60">Shock Aggregate</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.convergenceNarrativeStability.transitionShock.aggregate.toFixed(1)}
+                  </p>
+                </div>
+              </div>
+              <div className="mt-3 rounded-lg border border-white/10 bg-black/25 p-2 text-xs text-white/80">
+                <p className="uppercase tracking-widest text-white/60">Transition Shock</p>
+                <div className="mt-1 grid gap-2 md:grid-cols-4">
+                  <p>Energy: {adaptiveRefinement.convergenceNarrativeStability.transitionShock.energy.toFixed(1)}</p>
+                  <p>Narrative: {adaptiveRefinement.convergenceNarrativeStability.transitionShock.narrative.toFixed(1)}</p>
+                  <p>Cadence: {adaptiveRefinement.convergenceNarrativeStability.transitionShock.cadence.toFixed(1)}</p>
+                  <p>Aggregate: {adaptiveRefinement.convergenceNarrativeStability.transitionShock.aggregate.toFixed(1)}</p>
+                </div>
+              </div>
+              <div className="mt-3 rounded-lg border border-white/10 bg-black/25 p-2 text-xs text-white/80">
+                <p className="uppercase tracking-widest text-white/60">Recovery Chain Priority</p>
+                <p className="mt-1">
+                  {adaptiveRefinement.convergenceNarrativeStability.recoveryChainPriority
+                    .map((step) => step.replace(/_/g, " "))
+                    .join(" → ")}
+                </p>
+              </div>
+              {adaptiveRefinement.convergenceNarrativeStability.rankedStabilizationActions.length > 0 ? (
+                <div className="mt-3 rounded-lg border border-white/10 bg-black/25 p-2">
+                  <p className="text-xs uppercase tracking-widest text-white/60">Top Stabilization Actions</p>
+                  <ul className="mt-2 space-y-1 text-xs">
+                    {adaptiveRefinement.convergenceNarrativeStability.rankedStabilizationActions
+                      .slice(0, 6)
+                      .map((action, index) => (
+                        <li key={`${action.action}-${index}`}>
+                          {index + 1}. {action.action.replace(/_/g, " ")} — {action.reason} (severity{" "}
+                          {action.severity.toFixed(0)})
+                        </li>
+                      ))}
+                  </ul>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
           {adaptiveRefinement?.convergenceMetrics ? (
             <div
               className={`rounded-xl border p-3 text-sm ${convergenceSeverityStyles(

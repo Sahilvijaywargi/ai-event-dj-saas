@@ -1,3 +1,4 @@
+import type { StabilityAdvisory } from "@/lib/ai/convergence-narrative-stability";
 import type { TransitionEvaluationResult } from "@/lib/ai/transition-engine";
 import type { TransitionSimulationResult } from "@/lib/ai/transition-simulation";
 import type { ExecutionRuntimeState, TransportRuntimeState } from "@/lib/transition-orchestration/layer-state";
@@ -245,6 +246,44 @@ export function buildAdaptationContext(params: {
   const directives = buildAdaptationDirectives(instability);
   return { instability, directives };
 }
+
+export function applyStabilityAdvisoryToDirectives(
+  baseDirectives: AdaptationDirective,
+  stabilityAdvisory: StabilityAdvisory,
+): AdaptationDirective {
+  const boostedDecay = Number(
+    clamp(
+      baseDirectives.aggressionDecay + stabilityAdvisory.aggressionDecayBoost,
+      0,
+      1,
+    ).toFixed(3),
+  );
+  const warnings = [...baseDirectives.warnings];
+  if (stabilityAdvisory.reasoning.length) {
+    for (const reason of stabilityAdvisory.reasoning) {
+      warnings.push(`[Stability Advisory] ${reason}`);
+    }
+  }
+
+  return {
+    ...baseDirectives,
+    reduceAggression: baseDirectives.reduceAggression || stabilityAdvisory.aggressionDecayBoost > 0,
+    aggressionDecay: boostedDecay,
+    increaseContinuityWeight:
+      baseDirectives.increaseContinuityWeight || stabilityAdvisory.preferContinuityWeight,
+    widenWindow: baseDirectives.widenWindow || stabilityAdvisory.preferWidenWindow,
+    generateRecoveryBlend:
+      baseDirectives.generateRecoveryBlend || stabilityAdvisory.preferRecoveryBlend,
+    generateHoldState: baseDirectives.generateHoldState || stabilityAdvisory.preferHoldState,
+    generateSmoothBlend:
+      baseDirectives.generateSmoothBlend ||
+      stabilityAdvisory.preferRecoveryBlend ||
+      stabilityAdvisory.preferContinuityWeight,
+    warnings,
+  };
+}
+
+export type { StabilityAdvisory };
 
 function computeAverage(values: number[]) {
   if (!values.length) return 0;
