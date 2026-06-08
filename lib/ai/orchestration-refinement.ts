@@ -29,6 +29,7 @@ import { calibrateRuntimeTrust } from "@/lib/ai/runtime-trust-calibration";
 import { evaluateAutonomyReadiness } from "@/lib/ai/autonomy-readiness-engine";
 import { getStrategyReliabilityPenalty } from "@/lib/ai/strategy-reliability-history";
 import type { ExecutionRuntimeState, TransportRuntimeState } from "@/lib/transition-orchestration/layer-state";
+import { analyzeFastCutFailureDiagnostics } from "@/lib/ai/fast-cut-failure-diagnostics";
 import type { OrchestrationRefinementResult } from "@/lib/ai/orchestration-refinement-types";
 
 export type { OrchestrationRefinementResult, OrchestrationRefinementTelemetry } from "@/lib/ai/orchestration-refinement-types";
@@ -480,6 +481,14 @@ export function refineOrchestrationAfterSimulation(params: {
       }),
   }));
 
+  const fastCutFailureDiagnostics = analyzeFastCutFailureDiagnostics({
+    evaluation: params.evaluation,
+    simulation: params.simulation,
+    instability,
+    candidates: rankedCandidates,
+    convergenceByCandidateId: firstPass.metricsById,
+  });
+
   return {
     instabilityDetected: instability.refinementRequired,
     instabilitySignals: instability.signals,
@@ -509,6 +518,7 @@ export function refineOrchestrationAfterSimulation(params: {
     phraseRecovery,
     globalConvergenceState,
     candidateConvergence,
+    fastCutFailureDiagnostics,
     runtimeTrustCalibration,
     autonomyReadiness,
     phraseWindowAnalysis,

@@ -37,12 +37,20 @@ export async function GET(request: Request) {
 
   try {
     const tokenData = await exchangeCodeForTokens(code);
+    if (!tokenData.refresh_token?.trim()) {
+      console.error("[SPOTIFY AUTH] OAuth callback missing refresh_token; reconnect required", {
+        userId: user.id,
+      });
+      return NextResponse.redirect(
+        new URL("/dashboard?spotify_error=reconnect_required", request.url),
+      );
+    }
     const profile = await fetchSpotifyProfile(tokenData.access_token);
     await upsertSpotifyConnection({
       userId: user.id,
       profile,
       accessToken: tokenData.access_token,
-      refreshToken: tokenData.refresh_token ?? "",
+      refreshToken: tokenData.refresh_token,
       expiresInSeconds: tokenData.expires_in,
     });
 

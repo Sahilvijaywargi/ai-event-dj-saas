@@ -1683,6 +1683,103 @@ export function TransitionEnginePanel({ queueRecommendations }: TransitionEngine
             </div>
           ) : null}
 
+          {adaptiveRefinement?.fastCutFailureDiagnostics ? (
+            <div className="rounded-xl border border-rose-300/30 bg-rose-500/8 p-3 text-sm text-rose-50">
+              <p className="text-xs uppercase tracking-widest text-rose-100/85">FAST CUT FAILURE ANALYSIS</p>
+              <p className="mt-1 text-xs text-white/65">
+                Observability only — explains why fast-cut candidates failed simulation without changing scoring or
+                selection.
+              </p>
+              <p className="mt-2 text-xs text-white/80">{adaptiveRefinement.fastCutFailureDiagnostics.summary}</p>
+              <div className="mt-3 grid gap-3 md:grid-cols-4">
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest text-white/60">Sim Fast-Cut Steps</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.fastCutFailureDiagnostics.fastCutSimulationCount}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest text-white/60">Rejected Candidates</p>
+                  <p className="mt-1 font-semibold">
+                    {adaptiveRefinement.fastCutFailureDiagnostics.rejectedFastCutCount} /{" "}
+                    {adaptiveRefinement.fastCutFailureDiagnostics.fastCutCandidateCount}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest text-white/60">Instability</p>
+                  <p className="mt-1 font-semibold capitalize">
+                    {adaptiveRefinement.fastCutFailureDiagnostics.instabilityDetected ? "detected" : "none"}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest text-white/60">Top Failure Driver</p>
+                  <p className="mt-1 text-xs font-semibold leading-snug">
+                    {adaptiveRefinement.fastCutFailureDiagnostics.rankedFailureReasons[0]?.reason.replace(/^[^:]+:\s*/, "") ??
+                      "n/a"}
+                  </p>
+                </div>
+              </div>
+              {adaptiveRefinement.fastCutFailureDiagnostics.instabilitySignals.length > 0 ? (
+                <p className="mt-3 text-xs text-white/70">
+                  Instability signals:{" "}
+                  {adaptiveRefinement.fastCutFailureDiagnostics.instabilitySignals
+                    .map((signal) => signal.replace(/_/g, " "))
+                    .join(", ")}
+                </p>
+              ) : null}
+              {adaptiveRefinement.fastCutFailureDiagnostics.rankedFailureReasons.length > 0 ? (
+                <div className="mt-3 rounded-lg border border-white/10 bg-black/25 p-2">
+                  <p className="text-xs uppercase tracking-widest text-white/60">Ranked Failure Reasons</p>
+                  <ul className="mt-2 space-y-1 text-xs">
+                    {adaptiveRefinement.fastCutFailureDiagnostics.rankedFailureReasons.slice(0, 8).map((reason, index) => (
+                      <li key={`${reason.dimension}-${reason.reason}-${index}`}>
+                        {index + 1}. [{reason.dimension.replace(/([A-Z])/g, " $1").trim()}] {reason.reason} (severity{" "}
+                        {reason.severity.toFixed(0)})
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {adaptiveRefinement.fastCutFailureDiagnostics.rejectedCandidates.length > 0 ? (
+                <div className="mt-3 space-y-3">
+                  {adaptiveRefinement.fastCutFailureDiagnostics.rejectedCandidates.map((candidate) => (
+                    <div
+                      key={candidate.candidateId}
+                      className="rounded-lg border border-white/10 bg-black/30 p-3 text-xs text-white/85"
+                    >
+                      <p className="font-semibold capitalize text-rose-100">
+                        {candidate.candidateId.replace(/_/g, " ")}
+                        {candidate.rejected ? " — rejected" : ""}
+                        {candidate.globallyDivergent ? " — divergent" : ""}
+                      </p>
+                      {candidate.rejectionReasons.length > 0 ? (
+                        <p className="mt-1 text-white/65">
+                          Rejection codes: {candidate.rejectionReasons.join(", ").replace(/_/g, " ")}
+                        </p>
+                      ) : null}
+                      <div className="mt-2 grid gap-2 md:grid-cols-4">
+                        <p>Phrase stability: {candidate.contributions.phraseStability.toFixed(1)}</p>
+                        <p>Harmonic stability: {candidate.contributions.harmonicStability.toFixed(1)}</p>
+                        <p>Structural confidence: {candidate.contributions.structuralConfidence.toFixed(1)}</p>
+                        <p>Narrative continuity: {candidate.contributions.narrativeContinuity.toFixed(1)}</p>
+                        <p>Crowd momentum: {candidate.contributions.crowdMomentum.toFixed(1)}</p>
+                        <p>Recovery pressure: {candidate.contributions.recoveryPressure.toFixed(1)}</p>
+                        <p>Execution stability: {candidate.contributions.executionStability.toFixed(1)}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+              {adaptiveRefinement.fastCutFailureDiagnostics.simulationRiskReasons.length > 0 ? (
+                <ul className="mt-3 space-y-1 text-xs text-amber-100/90">
+                  {adaptiveRefinement.fastCutFailureDiagnostics.simulationRiskReasons.map((reason, index) => (
+                    <li key={`${reason}-${index}`}>- {reason}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
+
           {adaptiveRefinement?.convergenceMetrics ? (
             <div
               className={`rounded-xl border p-3 text-sm ${convergenceSeverityStyles(
@@ -1956,6 +2053,155 @@ export function TransitionEnginePanel({ queueRecommendations }: TransitionEngine
                   {runtimeTrustCalibration.calibrationReasons.map((reason, index) => (
                     <li key={`${reason}-${index}`}>- {reason}</li>
                   ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
+
+          {evaluation?.structuralCompatibility ? (
+            <div className="rounded-xl border border-violet-400/25 bg-violet-500/10 p-3 text-sm text-violet-50">
+              <p className="text-xs uppercase tracking-widest">STRUCTURAL CONFIDENCE</p>
+              <div className="mt-3 grid gap-3 md:grid-cols-4">
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Structural Confidence</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.structuralCompatibility.structuralConfidence.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Narrative Confidence</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.structuralCompatibility.narrativeConfidence.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Agreement Score</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.structuralCompatibility.structuralAgreement.agreementScore.toFixed(0)}%
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Severity</p>
+                  <p className="mt-1 font-semibold capitalize">
+                    {evaluation.structuralCompatibility.structuralAgreement.severity}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Phrase Window Prediction</p>
+                  <p className="mt-1 font-semibold capitalize">
+                    {evaluation.structuralCompatibility.inference.phraseAudioAgreement.phraseWindowPrediction.replace(
+                      /_/g,
+                      " ",
+                    )}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Audio Evidence Prediction</p>
+                  <p className="mt-1 font-semibold capitalize">
+                    {evaluation.structuralCompatibility.inference.phraseAudioAgreement.audioEvidencePrediction.replace(
+                      /_/g,
+                      " ",
+                    )}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Converged?</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.structuralCompatibility.converged ? "yes" : "no"}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Diagnostics</p>
+                  <p className="mt-1 text-xs font-semibold">
+                    {evaluation.transitionDiagnostics.structuralConfidence.toFixed(1)} /{" "}
+                    {evaluation.transitionDiagnostics.narrativeConfidence.toFixed(1)}
+                  </p>
+                </div>
+              </div>
+              {evaluation.structuralCompatibility.structuralConfidenceReasoning.length ? (
+                <ul className="mt-3 space-y-1 text-xs text-violet-100/90">
+                  {evaluation.structuralCompatibility.structuralConfidenceReasoning.slice(0, 8).map((line, index) => (
+                    <li key={`structural-confidence-reason-${index}-${line}`}>• {line}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
+
+          {evaluation?.structuralCompatibility?.inference?.structuralArbitration ? (
+            <div className="rounded-xl border border-cyan-400/25 bg-cyan-500/10 p-3 text-sm text-cyan-50">
+              <p className="text-xs uppercase tracking-widest">STRUCTURAL ARBITRATION</p>
+              <div className="mt-3 grid gap-3 md:grid-cols-4">
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Selected Source</p>
+                  <p className="mt-1 font-semibold capitalize">
+                    {evaluation.structuralCompatibility.inference.structuralArbitration.selectedSource.replace(
+                      /_/g,
+                      " ",
+                    )}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Arbitrated Section</p>
+                  <p className="mt-1 font-semibold capitalize">
+                    {evaluation.structuralCompatibility.inference.structuralArbitration.selectedSection.replace(
+                      /_/g,
+                      " ",
+                    )}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Arbitration Confidence</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.structuralCompatibility.inference.structuralArbitration.arbitrationConfidence.toFixed(
+                      1,
+                    )}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Override Applied</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.structuralCompatibility.inference.structuralArbitration.overrideApplied
+                      ? "yes"
+                      : "no"}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Phrase Confidence</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.structuralCompatibility.inference.structuralArbitration.phraseConfidence.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Audio Confidence</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.structuralCompatibility.inference.structuralArbitration.audioConfidence.toFixed(1)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Agreement Score</p>
+                  <p className="mt-1 font-semibold">
+                    {evaluation.structuralCompatibility.inference.structuralArbitration.agreementScore.toFixed(0)}%
+                  </p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/35 p-3">
+                  <p className="text-xs uppercase tracking-widest opacity-70">Live Arbiter</p>
+                  <p className="mt-1 text-xs font-semibold capitalize">
+                    {evaluation.structuralCompatibility.inference.debug.classificationInputs.arbiterSource
+                      ? String(
+                          evaluation.structuralCompatibility.inference.debug.classificationInputs.arbiterSource,
+                        ).replace(/_/g, " ")
+                      : "—"}
+                  </p>
+                </div>
+              </div>
+              {evaluation.structuralCompatibility.inference.structuralArbitration.arbitrationReason.length ? (
+                <ul className="mt-3 space-y-1 text-xs text-cyan-100/90">
+                  {evaluation.structuralCompatibility.inference.structuralArbitration.arbitrationReason
+                    .slice(0, 8)
+                    .map((line, index) => (
+                      <li key={`structural-arbitration-reason-${index}-${line}`}>• {line}</li>
+                    ))}
                 </ul>
               ) : null}
             </div>

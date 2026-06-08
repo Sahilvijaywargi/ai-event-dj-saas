@@ -14,6 +14,7 @@ import type { TransportRecoveryAnalysis } from "@/lib/spotify/transport-recovery
 import {
   analyzeStructuralCompatibility,
   applyStructuralIntelligenceInfluence,
+  applyStructuralNarrativeConfidence,
   inferCandidateEntrySection,
   inferSongStructurePosition,
   mapPhraseSectionToSongSection,
@@ -391,6 +392,10 @@ export type TransitionEvaluationResult = {
     entryQuality: number;
 
     structuralNarrativeContinuity: number;
+
+    structuralConfidence: number;
+
+    narrativeConfidence: number;
 
     detectedExitSection: string;
 
@@ -3551,32 +3556,38 @@ score +=
   const liveCurrentPhraseSection = currentTrackProfile.phraseSection;
   const candidateEntrySection = mapPhraseSectionToSongSection(nextTrackProfile.phraseSection);
 
-  const structuralAnalysis = resolveLiveStructuralAnalysis({
-    userId: params.userId,
-    trackName: playback.playbackState?.track?.name ?? topRecommendation?.name ?? null,
-    playbackProgressMs: playback.playbackState?.progressMs ?? null,
-    phraseTransitionWindow: phraseTelemetry.phraseTransitionWindow,
-    derivedCurrentPhraseSection: liveCurrentPhraseSection,
-    speechiness: topTransitionCandidate?.speechiness ?? null,
-    instrumentalness: topTransitionCandidate?.instrumentalness ?? null,
-    phrasePosition: phraseTelemetry.currentPhrasePosition,
-    phraseLengthBars: structuralPhraseLengthBars,
-    sessionEnergy: session?.current_energy ?? undefined,
-    roomEnergy: audioState.latest?.energy_level ?? audioState.drift.shortTermAverage,
-    energyTrend: audioState.drift.driftScore,
-    tensionTrend: harmonicEmotion.harmonicTension,
-    dropIntensity: topTransitionCandidate?.candidateTrack.dropIntensity ?? undefined,
-    executionWindowState: readinessAssessment.executionWindowState,
-    phraseCompatibility: topTransitionCandidate?.phraseCompatibility,
-    introLengthBars: topTransitionCandidate?.candidateTrack.introLengthBars ?? undefined,
-    candidateEnergy: topTransitionCandidate?.candidateTrack.energy ?? topRecommendation?.energy,
-    instrumentalSections: topTransitionCandidate?.candidateTrack.instrumentalSections ?? undefined,
-    candidatePhraseSection: candidateEntrySection,
-    phraseAlignmentScore:
-      topTransitionCandidate?.phraseAlignmentScore ?? phraseTelemetry.transitionTimingConfidence,
+  const structuralAnalysis = applyStructuralNarrativeConfidence({
+    analysis: resolveLiveStructuralAnalysis({
+      userId: params.userId,
+      trackName: playback.playbackState?.track?.name ?? topRecommendation?.name ?? null,
+      playbackProgressMs: playback.playbackState?.progressMs ?? null,
+      phraseTransitionWindow: phraseTelemetry.phraseTransitionWindow,
+      derivedCurrentPhraseSection: liveCurrentPhraseSection,
+      speechiness: topTransitionCandidate?.speechiness ?? null,
+      instrumentalness: topTransitionCandidate?.instrumentalness ?? null,
+      phrasePosition: phraseTelemetry.currentPhrasePosition,
+      phraseLengthBars: structuralPhraseLengthBars,
+      sessionEnergy: session?.current_energy ?? undefined,
+      roomEnergy: audioState.latest?.energy_level ?? audioState.drift.shortTermAverage,
+      energyTrend: audioState.drift.driftScore,
+      tensionTrend: harmonicEmotion.harmonicTension,
+      dropIntensity: topTransitionCandidate?.candidateTrack.dropIntensity ?? undefined,
+      executionWindowState: readinessAssessment.executionWindowState,
+      phraseCompatibility: topTransitionCandidate?.phraseCompatibility,
+      introLengthBars: topTransitionCandidate?.candidateTrack.introLengthBars ?? undefined,
+      candidateEnergy: topTransitionCandidate?.candidateTrack.energy ?? topRecommendation?.energy,
+      instrumentalSections: topTransitionCandidate?.candidateTrack.instrumentalSections ?? undefined,
+      candidatePhraseSection: candidateEntrySection,
+      phraseAlignmentScore:
+        topTransitionCandidate?.phraseAlignmentScore ?? phraseTelemetry.transitionTimingConfidence,
+    }),
+    narrativeContinuity: narrativeFlow.narrativeContinuity,
+    journeyAlignment: narrativeFlow.narrativeJourneyAlignment,
+    resolutionConfidence: narrativeFlow.narrativeResolutionConfidence,
   });
   reasons.push(...structuralAnalysis.reasoning.slice(0, 3));
   reasons.push(...structuralAnalysis.inference.inferenceReason.slice(0, 2));
+  reasons.push(...structuralAnalysis.structuralConfidenceReasoning.slice(0, 2));
 
   const learningProfile = createDefaultTransitionLearningProfile();
   const learningObservation = applyTransitionLearningObservation({
@@ -4063,6 +4074,10 @@ score +=
       entryQuality: structuralAnalysis.entryQuality,
 
       structuralNarrativeContinuity: structuralAnalysis.narrativeContinuity,
+
+      structuralConfidence: structuralAnalysis.structuralConfidence,
+
+      narrativeConfidence: structuralAnalysis.narrativeConfidence,
 
       detectedExitSection: structuralAnalysis.exitSection,
 

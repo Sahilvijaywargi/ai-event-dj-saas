@@ -37,6 +37,8 @@ export type { PhraseRecoveryResult } from "@/lib/ai/phrase-lock-recovery";
 export type { ConvergenceRecoveryResult } from "@/lib/ai/convergence-recovery-engine";
 export type { AudioIntelligenceResult } from "@/lib/ai/audio-intelligence-engine";
 
+export type { FastCutFailureDiagnostics } from "@/lib/ai/fast-cut-failure-diagnostics";
+
 export type OrchestrationRefinementResult = {
   instabilityDetected: boolean;
   instabilitySignals: string[];
@@ -52,6 +54,7 @@ export type OrchestrationRefinementResult = {
   phraseRecovery: PhraseRecoveryDirectiveSnapshot | null;
   globalConvergenceState: "stable" | "degraded" | "divergent";
   candidateConvergence: Array<{ candidateId: string; metrics: OrchestrationConvergenceMetrics }>;
+  fastCutFailureDiagnostics: import("@/lib/ai/fast-cut-failure-diagnostics").FastCutFailureDiagnostics;
   runtimeTrustCalibration?: import("@/lib/ai/runtime-trust-calibration").RuntimeTrustCalibration | null;
   autonomyReadiness?: import("@/lib/ai/autonomy-readiness-engine").AutonomyReadinessResult | null;
   phraseWindowAnalysis?: import("@/lib/ai/phrase-window-engine").PhraseWindowAnalysis | null;

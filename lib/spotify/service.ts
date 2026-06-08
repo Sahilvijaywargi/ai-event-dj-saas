@@ -75,48 +75,126 @@ function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function withRetry<T>(fn: () => Promise<T>, retries = 1): Promise<T> {
-  let errorRef: unknown;
-  for (let attempt = 0; attempt <= retries; attempt += 1) {
-    try {
-      return await fn();
-    } catch (error) {
-      errorRef = error;
-      if (attempt === retries) break;
-      await wait(300 * (attempt + 1));
-    }
-  }
-  throw errorRef;
+function resolveExpiresAtMs(expiresAt: string | null | undefined): number | null {
+  if (!expiresAt) return null;
+  const ms = new Date(expiresAt).getTime();
+  return Number.isFinite(ms) ? ms : null;
 }
 
-async function spotifyFetch<T>(
-  accessToken: string,
-  path: string,
-  options?: RequestInit,
-): Promise<T> {
-  return withRetry(async () => {
-    const response = await fetch(`${SPOTIFY_API_BASE}${path}`, {
-      ...options,
+function isSpotifyUnauthorizedError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("(401)") || /access token expired/i.test(message);
+}
+
+type SpotifyApiRequestParams = {
+  accessToken: string;
+  path: string;
+  options?: RequestInit;
+  expectJson?: boolean;
+  errorPrefix?: string;
+};
+
+async function spotifyApiRequest<T>(params: SpotifyApiRequestParams): Promise<T> {
+  const errorPrefix = params.errorPrefix ?? "Spotify API";
+  const expectJson = params.expectJson ?? true;
+
+  const execute = async () => {
+    const response = await fetch(`${SPOTIFY_API_BASE}${params.path}`, {
+      ...params.options,
       headers: {
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: `Bearer ${params.accessToken}`,
         "Content-Type": "application/json",
-        ...(options?.headers ?? {}),
+        ...(params.options?.headers ?? {}),
       },
     });
 
     if (response.status === 429) {
       const retryAfter = Number(response.headers.get("retry-after") ?? "1");
       await wait(retryAfter * 1000);
-      throw new Error("Spotify rate limit hit; retrying.");
+      throw new Error(`${errorPrefix} rate limit hit; retrying.`);
     }
 
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(`Spotify API error (${response.status}): ${text}`);
+      throw new Error(`${errorPrefix} error (${response.status}): ${text}`);
+    }
+
+    if (!expectJson) {
+      return undefined as T;
     }
 
     return (await response.json()) as T;
-  }, 1);
+  };
+
+  try {
+    return await execute();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("rate limit hit; retrying.")) {
+      return execute();
+    }
+    throw error;
+  }
+}
+
+/** OAuth callback profile fetch — uses a freshly issued access token, not userId auth. */
+async function spotifyFetch<T>(accessToken: string, path: string, options?: RequestInit): Promise<T> {
+  return spotifyApiRequest<T>({ accessToken, path, options, expectJson: true, errorPrefix: "Spotify API" });
+}
+
+export type SpotifyAuthenticatedFetchParams = {
+  userId: string;
+  path: string;
+  options?: RequestInit;
+  expectJson?: boolean;
+  errorPrefix?: string;
+};
+
+export async function spotifyAuthenticatedFetch<T>(params: SpotifyAuthenticatedFetchParams): Promise<T> {
+  const requestParams = {
+    path: params.path,
+    options: params.options,
+    expectJson: params.expectJson,
+    errorPrefix: params.errorPrefix,
+  };
+
+  let accessToken = await getValidSpotifyAccessToken(params.userId);
+
+  try {
+    return await spotifyApiRequest<T>({ accessToken, ...requestParams });
+  } catch (error) {
+    if (!isSpotifyUnauthorizedError(error)) {
+      throw error;
+    }
+
+    console.warn("[SPOTIFY AUTH] reactive 401 recovery triggered", {
+      userId: params.userId,
+      path: params.path,
+    });
+
+    try {
+      console.log("[SPOTIFY AUTH] token refresh attempted", {
+        userId: params.userId,
+        reason: "reactive_401",
+        path: params.path,
+      });
+      accessToken = await forceRefreshSpotifyAccessToken(params.userId);
+      console.log("[SPOTIFY AUTH] token refresh succeeded", {
+        userId: params.userId,
+        reason: "reactive_401",
+        path: params.path,
+      });
+      return await spotifyApiRequest<T>({ accessToken, ...requestParams });
+    } catch (refreshError) {
+      console.error("[SPOTIFY AUTH] token refresh failed", {
+        userId: params.userId,
+        reason: "reactive_401",
+        path: params.path,
+        error: refreshError instanceof Error ? refreshError.message : String(refreshError),
+      });
+      throw refreshError;
+    }
+  }
 }
 
 function appendAuthReasoning(existing: string[], next: string) {
@@ -183,12 +261,14 @@ export async function ensureSpotifyTransportAuth(params: EnsureSpotifyTransportA
   }
   const connection = data as SpotifyConnectionRecord;
   const now = Date.now();
-  const expiresAtMs = new Date(connection.expires_at).getTime();
+  const expiresAtMs = resolveExpiresAtMs(connection.expires_at);
+  const expiresAtInvalid = expiresAtMs === null;
   let accessToken: string;
   let refreshToken: string | null = null;
   try {
     accessToken = decryptToken(connection.access_token);
-    refreshToken = connection.refresh_token ? decryptToken(connection.refresh_token) : null;
+    const decryptedRefresh = connection.refresh_token ? decryptToken(connection.refresh_token) : null;
+    refreshToken = decryptedRefresh?.trim() ? decryptedRefresh : null;
   } catch {
     const degraded: SpotifyTransportAuthContinuityState = {
       ...continuity,
@@ -203,7 +283,14 @@ export async function ensureSpotifyTransportAuth(params: EnsureSpotifyTransportA
     transportAuthContinuityStore.set(params.userId, degraded);
     return { ok: false, accessToken: null, state: degraded };
   }
-  const expiresSoon = now + minValidityMs >= expiresAtMs;
+  if (expiresAtInvalid) {
+    console.warn("[SPOTIFY AUTH] invalid expires_at detected; forcing refresh path", {
+      userId: params.userId,
+      expiresAt: connection.expires_at,
+    });
+  }
+  const expiresSoon =
+    expiresAtInvalid || (expiresAtMs !== null && now + minValidityMs >= expiresAtMs);
   const shouldRefresh = Boolean(params.forceRefresh) || expiresSoon;
   const canProactivelyRefresh =
     Boolean(params.runtimeTickActive) || Boolean(params.supervisedExecutionActive) || Boolean(params.reason);
@@ -223,7 +310,7 @@ export async function ensureSpotifyTransportAuth(params: EnsureSpotifyTransportA
   if (!refreshToken) {
     const expired: SpotifyTransportAuthContinuityState = {
       ...continuity,
-      transportAuthState: expiresAtMs <= now ? "expired" : "degraded",
+      transportAuthState: expiresAtInvalid || (expiresAtMs !== null && expiresAtMs <= now) ? "expired" : "degraded",
       accessTokenExpiresAt: expiresAtMs,
       refreshFailureCount: continuity.refreshFailureCount + 1,
       authRecoveryReasoning: appendAuthReasoning(
@@ -245,6 +332,12 @@ export async function ensureSpotifyTransportAuth(params: EnsureSpotifyTransportA
   };
   transportAuthContinuityStore.set(params.userId, refreshing);
   try {
+    console.log("[SPOTIFY AUTH] token refresh attempted", {
+      userId: params.userId,
+      reason: params.reason ?? "proactive",
+      forceRefresh: Boolean(params.forceRefresh),
+      expiresAtInvalid,
+    });
     const refreshed = await refreshSpotifyToken(refreshToken);
     accessToken = refreshed.access_token;
     const newRefreshToken = refreshed.refresh_token ?? refreshToken;
@@ -273,11 +366,22 @@ export async function ensureSpotifyTransportAuth(params: EnsureSpotifyTransportA
       ),
     };
     transportAuthContinuityStore.set(params.userId, healthy);
+    console.log("[SPOTIFY AUTH] token refresh succeeded", {
+      userId: params.userId,
+      reason: params.reason ?? "proactive",
+      forceRefresh: Boolean(params.forceRefresh),
+    });
     return { ok: true, accessToken, state: healthy };
-  } catch {
+  } catch (refreshError) {
+    console.error("[SPOTIFY AUTH] token refresh failed", {
+      userId: params.userId,
+      reason: params.reason ?? "proactive",
+      forceRefresh: Boolean(params.forceRefresh),
+      error: refreshError instanceof Error ? refreshError.message : String(refreshError),
+    });
     const failed: SpotifyTransportAuthContinuityState = {
       ...refreshing,
-      transportAuthState: expiresAtMs <= now ? "expired" : "degraded",
+      transportAuthState: expiresAtInvalid || (expiresAtMs !== null && expiresAtMs <= now) ? "expired" : "degraded",
       refreshFailureCount: continuity.refreshFailureCount + 1,
       authRecoveryReasoning: appendAuthReasoning(
         refreshing.authRecoveryReasoning,
@@ -467,11 +571,10 @@ function mapSpotifyPlaylistItem(
 }
 
 export async function getSpotifyPlaylists(userId: string): Promise<SpotifyPlaylist[]> {
-  const accessToken = await getValidSpotifyAccessToken(userId);
-  const data = await spotifyFetch<SpotifyUserPlaylistsResponse>(
-    accessToken,
-    "/me/playlists?limit=20",
-  );
+  const data = await spotifyAuthenticatedFetch<SpotifyUserPlaylistsResponse>({
+    userId,
+    path: "/me/playlists?limit=20",
+  });
 
   const playlists: SpotifyPlaylist[] = [];
   for (const item of data.items ?? []) {
@@ -482,10 +585,12 @@ export async function getSpotifyPlaylists(userId: string): Promise<SpotifyPlayli
 }
 
 export async function getSpotifyLikedSongs(userId: string) {
-  const accessToken = await getValidSpotifyAccessToken(userId);
-  const data = await spotifyFetch<{
+  const data = await spotifyAuthenticatedFetch<{
     items: Array<{ track: { id: string; name: string; artists: Array<{ name: string }> } }>;
-  }>(accessToken, "/me/tracks?limit=20");
+  }>({
+    userId,
+    path: "/me/tracks?limit=20",
+  });
   return data.items.map((item) => ({
     id: item.track.id,
     name: item.track.name,
@@ -498,11 +603,9 @@ export async function searchSpotify(
   query: string,
   type: SpotifySearchType,
 ): Promise<SpotifySearchItem[]> {
-  const accessToken = await getValidSpotifyAccessToken(userId);
-
   const encoded = encodeURIComponent(query);
 
-  const data = await spotifyFetch<{
+  const data = await spotifyAuthenticatedFetch<{
     tracks?: {
       items: Array<{
         id: string;
@@ -524,10 +627,10 @@ export async function searchSpotify(
         name: string;
       }>;
     };
-  }>(
-    accessToken,
-    `/search?q=${encoded}&type=${type}&limit=10`,
-  );
+  }>({
+    userId,
+    path: `/search?q=${encoded}&type=${type}&limit=10`,
+  });
 
   if (type === "track") {
     return (data.tracks?.items ?? [])
@@ -565,9 +668,8 @@ export async function getSpotifyAudioFeatures(
   userId: string,
   trackIds: string[],
 ): Promise<SpotifyAudioFeatures[]> {
-  const accessToken = await getValidSpotifyAccessToken(userId);
   const ids = trackIds.slice(0, 50).join(",");
-  const data = await spotifyFetch<{
+  const data = await spotifyAuthenticatedFetch<{
     audio_features: Array<{
       id: string;
       tempo: number;
@@ -580,7 +682,10 @@ export async function getSpotifyAudioFeatures(
       key: number;
       mode: 0 | 1;
     }>;
-  }>(accessToken, `/audio-features?ids=${ids}`);
+  }>({
+    userId,
+    path: `/audio-features?ids=${ids}`,
+  });
   return (data.audio_features ?? []).filter(Boolean);
 }
 
@@ -591,7 +696,6 @@ export async function getSpotifyRecommendations(params: {
   seedGenres?: string[];
   targetEnergy?: number;
 }): Promise<SpotifyRecommendation[]> {
-  const accessToken = await getValidSpotifyAccessToken(params.userId);
   const query = new URLSearchParams();
   if (params.seedTracks?.length) query.set("seed_tracks", params.seedTracks.slice(0, 5).join(","));
   if (params.seedArtists?.length) query.set("seed_artists", params.seedArtists.slice(0, 5).join(","));
@@ -601,9 +705,12 @@ export async function getSpotifyRecommendations(params: {
   }
   query.set("limit", "20");
 
-  const data = await spotifyFetch<{
+  const data = await spotifyAuthenticatedFetch<{
     tracks: Array<{ id: string; name: string; artists: Array<{ name: string }> }>;
-  }>(accessToken, `/recommendations?${query.toString()}`);
+  }>({
+    userId: params.userId,
+    path: `/recommendations?${query.toString()}`,
+  });
   return (data.tracks ?? []).map((track) => ({
     id: track.id,
     name: track.name,

@@ -6,13 +6,7 @@ import {
   SpotifyQueueState,
   SpotifyPlaybackState,
 } from "@/lib/spotify/types";
-import { ensureSpotifyTransportAuth, getValidSpotifyAccessToken } from "@/lib/spotify/service";
-
-const SPOTIFY_API_BASE = "https://api.spotify.com/v1";
-
-function wait(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+import { ensureSpotifyTransportAuth, spotifyAuthenticatedFetch } from "@/lib/spotify/service";
 
 async function spotifyPlaybackRequest<T>(
   userId: string,
@@ -29,38 +23,14 @@ async function spotifyPlaybackRequest<T>(
   if (!auth.ok) {
     throw new Error("Spotify playback blocked due to auth expiry.");
   }
-  const accessToken = await getValidSpotifyAccessToken(userId);
-  let lastError: unknown = null;
-  for (let attempt = 0; attempt <= 1; attempt += 1) {
-    try {
-      const response = await fetch(`${SPOTIFY_API_BASE}${path}`, {
-        ...options,
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-          ...(options?.headers ?? {}),
-        },
-      });
-      if (response.status === 429) {
-        const retryAfter = Number(response.headers.get("retry-after") ?? "1");
-        await wait(retryAfter * 1000);
-        throw new Error("Spotify playback rate limited.");
-      }
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`Spotify playback API error (${response.status}): ${text}`);
-      }
-      if (!expectJson) {
-        return undefined as T;
-      }
-      return (await response.json()) as T;
-    } catch (error) {
-      lastError = error;
-      if (attempt === 1) break;
-      await wait(250 * (attempt + 1));
-    }
-  }
-  throw lastError;
+
+  return spotifyAuthenticatedFetch<T>({
+    userId,
+    path,
+    options,
+    expectJson,
+    errorPrefix: "Spotify playback API",
+  });
 }
 
 export async function getAvailableSpotifyDevices(userId: string): Promise<SpotifyDevice[]> {

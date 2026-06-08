@@ -13,6 +13,15 @@ import {
 } from "@/lib/ai/structural-detection-diagnostics";
 import { summarizePhraseCalibration } from "@/lib/ai/phrase-calibration";
 import { resolveSectionClassification } from "@/lib/ai/structural-detection-diagnostics";
+import {
+  evaluateStructuralAgreement,
+  type StructuralAgreementResult,
+  type StructuralSection,
+} from "@/lib/ai/structural-agreement";
+import {
+  resolveStructuralArbitration,
+  type StructuralArbitrationResult,
+} from "@/lib/ai/structural-arbitration";
 
 export type SongSection =
   | "intro"
@@ -62,6 +71,7 @@ export interface StructuralInferenceDiagnostics {
   positionDrivenConfidence: number;
   classificationMode: ClassificationMode;
   phraseAudioAgreement: PhraseAudioAgreement;
+  structuralArbitration: StructuralArbitrationResult;
   calibrationSummary?: {
     totalObservations: number;
     mismatchRate: number;
@@ -75,6 +85,11 @@ export interface StructuralCompatibilityAnalysis {
   entryQuality: number;
   narrativeContinuity: number;
   structuralCompatibility: number;
+  structuralConfidence: number;
+  narrativeConfidence: number;
+  converged: boolean;
+  structuralAgreement: StructuralAgreementResult;
+  structuralConfidenceReasoning: string[];
   reasoning: string[];
   exitSection: SongSection;
   entrySection: SongSection;
@@ -143,6 +158,79 @@ export function mapPhraseSectionToSongSection(
   if (section === "buildup") return "build";
   if (section === "bridge") return "breakdown";
   return section;
+}
+
+export function mapSongSectionToStructuralSection(section: SongSection): StructuralSection {
+  if (section === "pre_chorus") return "build";
+  if (section === "build") return "build";
+  if (section === "drop") return "drop";
+  if (section === "breakdown") return "breakdown";
+  if (section === "intro") return "intro";
+  if (section === "verse") return "verse";
+  if (section === "chorus") return "chorus";
+  if (section === "outro") return "outro";
+  return "unknown";
+}
+
+export function computeStructuralConfidence(params: {
+  agreementScore: number;
+  sectionConfidence: number;
+  phraseAlignment: number;
+}): number {
+  return round(
+    params.agreementScore * 0.5 + params.sectionConfidence * 0.3 + params.phraseAlignment * 0.2,
+  );
+}
+
+export function computeNarrativeConfidence(params: {
+  structuralConfidence: number;
+  narrativeContinuity: number;
+  journeyAlignment: number;
+  resolutionConfidence: number;
+}): { narrativeConfidence: number; reasoning: string[] } {
+  const reasoning: string[] = [];
+  let narrativeConfidence = round(
+    params.structuralConfidence * 0.4 +
+      params.narrativeContinuity * 0.25 +
+      params.journeyAlignment * 0.2 +
+      params.resolutionConfidence * 0.15,
+  );
+
+  if (params.structuralConfidence < 50) {
+    narrativeConfidence = round(narrativeConfidence * 0.75);
+    reasoning.push("Structural uncertainty degrades narrative trust.");
+    reasoning.push("Narrative continuity confidence reduced.");
+  }
+
+  if (params.structuralConfidence < 50) {
+    reasoning.push("Structural agreement weak.");
+  }
+
+  return { narrativeConfidence, reasoning };
+}
+
+export function applyStructuralNarrativeConfidence(params: {
+  analysis: StructuralCompatibilityAnalysis;
+  narrativeContinuity: number;
+  journeyAlignment: number;
+  resolutionConfidence: number;
+}): StructuralCompatibilityAnalysis {
+  const narrativeLayer = computeNarrativeConfidence({
+    structuralConfidence: params.analysis.structuralConfidence,
+    narrativeContinuity: params.narrativeContinuity,
+    journeyAlignment: params.journeyAlignment,
+    resolutionConfidence: params.resolutionConfidence,
+  });
+
+  return {
+    ...params.analysis,
+    narrativeConfidence: narrativeLayer.narrativeConfidence,
+    structuralConfidenceReasoning: [
+      ...params.analysis.structuralConfidenceReasoning,
+      ...narrativeLayer.reasoning,
+    ],
+    reasoning: [...params.analysis.reasoning, ...narrativeLayer.reasoning.slice(0, 2)],
+  };
 }
 
 export function applyEnergySectionOverrides(params: {
@@ -498,6 +586,40 @@ export function resolveLiveStructuralAnalysis(params: {
 
   const calibrationSummary = summarizePhraseCalibration(params.userId);
 
+  const structuralAgreement = evaluateStructuralAgreement(
+    mapSongSectionToStructuralSection(classification.phraseWindowPrediction),
+    mapSongSectionToStructuralSection(classification.audioEvidencePrediction),
+  );
+  const structuralConfidence = computeStructuralConfidence({
+    agreementScore: structuralAgreement.agreementScore,
+    sectionConfidence: exitPosition.sectionConfidence,
+    phraseAlignment: params.phraseAlignmentScore,
+  });
+  const converged = structuralAgreement.agreementScore >= 75;
+  const structuralConfidenceReasoning = [
+    ...structuralAgreement.reasoning,
+    `Structural confidence ${structuralConfidence.toFixed(0)} (agreement ${structuralAgreement.agreementScore.toFixed(0)}, section ${exitPosition.sectionConfidence.toFixed(0)}, phrase ${params.phraseAlignmentScore.toFixed(0)}).`,
+  ];
+  if (!converged) {
+    structuralConfidenceReasoning.push("Phrase window and audio evidence have not converged.");
+  }
+
+  const structuralArbitration = resolveStructuralArbitration({
+    phraseWindowPrediction: classification.phraseWindowPrediction,
+    audioEvidencePrediction: classification.audioEvidencePrediction,
+    phraseConfidence: classification.windowGuidanceConfidence,
+    audioConfidence: classification.audioConfidence,
+    agreementScore: structuralAgreement.agreementScore,
+  });
+  structuralConfidenceReasoning.push(...structuralArbitration.arbitrationReason.slice(-2));
+
+  analysis.structuralConfidence = structuralConfidence;
+  analysis.narrativeConfidence = structuralConfidence;
+  analysis.converged = converged;
+  analysis.structuralAgreement = structuralAgreement;
+  analysis.structuralConfidenceReasoning = structuralConfidenceReasoning;
+  analysis.reasoning.push(...structuralConfidenceReasoning.slice(0, 2));
+
   analysis.inference = {
     inferenceSource,
     sectionConfidence: exitPosition.sectionConfidence,
@@ -516,9 +638,13 @@ export function resolveLiveStructuralAnalysis(params: {
     phraseAudioAgreement: {
       phraseWindowPrediction: classification.phraseWindowPrediction,
       audioEvidencePrediction: classification.audioEvidencePrediction,
-      agreementScore: classification.agreementScore,
-      disagreementReason: classification.disagreementReason,
+      agreementScore: structuralAgreement.agreementScore,
+      disagreementReason:
+        structuralAgreement.agreementScore >= 85
+          ? null
+          : `Phrase window implies "${classification.phraseWindowPrediction}" but audio evidence implies "${classification.audioEvidencePrediction}".`,
     },
+    structuralArbitration,
     calibrationSummary: {
       totalObservations: calibrationSummary.totalObservations,
       mismatchRate: calibrationSummary.mismatchRate,
@@ -556,6 +682,13 @@ export function analyzeStructuralCompatibility(params: {
       narrative.score * 0.15,
   );
 
+  const defaultAgreement = evaluateStructuralAgreement("unknown", "unknown");
+  const defaultStructuralConfidence = computeStructuralConfidence({
+    agreementScore: defaultAgreement.agreementScore,
+    sectionConfidence: params.exitPosition.sectionConfidence,
+    phraseAlignment: params.phraseAlignmentScore,
+  });
+
   const reasoning = [
     ...exit.reasoning.slice(0, 2),
     ...entry.reasoning.slice(0, 2),
@@ -569,6 +702,11 @@ export function analyzeStructuralCompatibility(params: {
     entryQuality: entry.entryQuality,
     narrativeContinuity: narrative.score,
     structuralCompatibility,
+    structuralConfidence: defaultStructuralConfidence,
+    narrativeConfidence: defaultStructuralConfidence,
+    converged: defaultAgreement.agreementScore >= 75,
+    structuralAgreement: defaultAgreement,
+    structuralConfidenceReasoning: [...defaultAgreement.reasoning],
     reasoning,
     exitSection: exit.exitSection,
     entrySection: entry.entrySection,
@@ -605,6 +743,13 @@ export function analyzeStructuralCompatibility(params: {
         agreementScore: 100,
         disagreementReason: null,
       },
+      structuralArbitration: resolveStructuralArbitration({
+        phraseWindowPrediction: params.exitPosition.currentSection,
+        audioEvidencePrediction: params.exitPosition.currentSection,
+        phraseConfidence: params.exitPosition.sectionConfidence,
+        audioConfidence: params.exitPosition.sectionConfidence,
+        agreementScore: 100,
+      }),
     },
   };
 }
